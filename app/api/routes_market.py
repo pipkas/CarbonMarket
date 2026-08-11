@@ -45,6 +45,7 @@ def _allocation_to_quote(allocation: AllocationResult, *, quantity_mode: bool) -
         seller = user_repo.get(item.listing.seller_id)
         offers.append(QuoteOfferDTO(
             listing_id=item.listing.id,
+            seller_id=item.listing.seller_id,
             seller_display_name=seller.display_name if seller else "—",
             characteristics=CharacteristicsFilterDTO(**item.listing.characteristics.__dict__),
             price_per_unit=item.price_per_unit,

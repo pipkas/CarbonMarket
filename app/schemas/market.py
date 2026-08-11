@@ -7,7 +7,7 @@ from app.schemas.carbon_unit import CharacteristicsFilterDTO
 
 
 class BuyExactQuantityRequest(BaseModel):
-    quantity_needed: float
+    quantity_needed: int       # УЕ — только целое число
     characteristics: CharacteristicsFilterDTO | None = None
 
 
@@ -18,7 +18,7 @@ class InvestAmountRequest(BaseModel):
 
 class ReserveFromListingRequest(BaseModel):
     listing_id: str
-    quantity: float
+    quantity: int              # УЕ — только целое число
 
 
 class QuoteOfferDTO(BaseModel):
@@ -29,6 +29,7 @@ class QuoteOfferDTO(BaseModel):
     покупатель мог детально ознакомиться ДО оформления сделки.
     """
     listing_id: str
+    seller_id: str
     seller_display_name: str
     characteristics: CharacteristicsFilterDTO
     price_per_unit: float
@@ -62,3 +63,39 @@ class CompositeVoucherResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------------------------
+# Детальный ответ для истории — включает компоненты с их статусами
+# ---------------------------------------------------------------------------
+
+class SimpleVoucherDTO(BaseModel):
+    id: str
+    seller_id: str
+    seller_display_name: str
+    listing_id: str
+    project_name: str | None
+    quantity: float
+    price_per_unit: float
+    total_price: float
+    status: str          # "ISSUED" | "REDEEMED" | "CANCELLED"
+    created_at: datetime
+    redeemed_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class CompositeVoucherDetailResponse(BaseModel):
+    id: str
+    buyer_id: str
+    total_quantity: float
+    total_price: float
+    scenario: str
+    created_at: datetime
+    components: list[SimpleVoucherDTO]
+    status: str          # "ISSUED" | "REDEEMED" | "PARTIAL"
+
+    class Config:
+        from_attributes = True
+

@@ -37,6 +37,7 @@
          потребность меньше минимума объявления, либо добираем до
          минимума (если это укладывается в остаток), либо пропускаем
          объявление для этого запроса.
+       - всегда целое число УЕ (floor)
   d) Останавливаемся, когда потребность закрыта (количество или бюджет).
 
   ОГОВОРКА (честно фиксируем ограничение MVP): это быстрая эвристика, а
@@ -44,6 +45,7 @@
   возникает из-за min/max_deal_quantity. Точку расширения — замену на
   ILP/DP-солвер — можно внести в `_allocate`, не трогая остальной код.
 """
+import math
 from dataclasses import dataclass, field
 
 from app.core.exceptions import InsufficientMarketSupplyError
@@ -96,7 +98,7 @@ def _allocate(
             upper_bound = listing.remaining_quantity
             if listing.max_deal_quantity:
                 upper_bound = min(upper_bound, listing.max_deal_quantity)
-            take = min(upper_bound, remaining_needed)
+            take = math.floor(min(upper_bound, remaining_needed))
             if listing.min_deal_quantity and take < listing.min_deal_quantity:
                 if listing.min_deal_quantity <= upper_bound:
                     take = listing.min_deal_quantity
@@ -119,7 +121,7 @@ def _allocate(
                 upper_bound_qty = min(upper_bound_qty, listing.max_deal_quantity)
             price_per_unit = listing.effective_price_per_unit(upper_bound_qty)
             affordable_qty = remaining_budget / price_per_unit
-            take = min(upper_bound_qty, affordable_qty)
+            take = math.floor(min(upper_bound_qty, affordable_qty))
             if listing.min_deal_quantity and take < listing.min_deal_quantity:
                 continue
             if take <= 1e-9:
@@ -180,3 +182,4 @@ def invest_amount(buyer_id: str, budget_amount: float, characteristics_filter: C
 def reserve_from_listing(buyer_id: str, listing: Listing, quantity: float) -> CompositeVoucher:
     voucher = voucher_service.issue_simple_voucher(listing, buyer_id, quantity)
     return voucher_service.build_composite_voucher(buyer_id, [voucher], scenario="CHOOSE_SELLER")
+

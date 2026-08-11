@@ -29,6 +29,7 @@
       <button class="topnav-item is-active" data-view="market">Витрина</button>
       <button class="topnav-item" data-view="listings">Мои объявления</button>
       <button class="topnav-item" data-view="vouchers">Мои векселя</button>
+      <button class="topnav-item" data-view="history">История</button>
     </nav>
 
     <div class="auth-area">
@@ -218,8 +219,40 @@
       <div id="vouchers-list" class="cards-grid"></div>
     </div>
   </section>
+  <!-- ---------- ИСТОРИЯ (требует входа) ---------- -->
+  <section id="view-history" class="view">
+    <header class="view-head">
+      <div>
+        <div class="eyebrow">Активность</div>
+        <h2>История сделок</h2>
+      </div>
+    </header>
+
+    <div id="history-authgate" class="authgate" hidden>
+      <p>Чтобы видеть историю ваших сделок, войдите в аккаунт.</p>
+      <button class="btn btn--primary" data-open-auth>Войти или зарегистрироваться</button>
+    </div>
+
+    <div id="history-authcontent">
+      <p class="panel-desc" style="max-width:60ch;margin-bottom:24px">
+        Все покупки векселей и их обналичивания. Статус «Выпущен» означает,
+        что УЕ заморожены у продавца; «Погашен» — что УЕ уже у вас на балансе.
+      </p>
+      <div id="history-list" class="history-list"></div>
+    </div>
+  </section>
 
 </main>
+
+<!-- ============== МОДАЛКА ПРОФИЛЯ ПРОДАВЦА ============== -->
+<div class="modal-overlay" id="seller-modal-overlay" hidden>
+  <div class="modal seller-modal" role="dialog" aria-modal="true" aria-labelledby="seller-modal-title">
+    <button class="modal-close" id="close-seller-btn" aria-label="Закрыть">✕</button>
+    <div id="seller-modal-content">
+      <p class="empty-row">Загружаю…</p>
+    </div>
+  </div>
+</div>
 
 <!-- ============== МОДАЛКА АВТОРИЗАЦИИ (скрыта, открывается кнопкой «Войти») ============== -->
 <div class="modal-overlay" id="auth-modal-overlay" hidden>
