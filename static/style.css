@@ -162,12 +162,18 @@ input, select { font-family: var(--font-body); }
   background: rgba(18, 53, 38, 0.45);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
+  overflow-y: auto;          /* прокрутка оверлея при высокой форме  */
   animation: fade .15s ease both;
 }
+/* Исправление: атрибут hidden должен побеждать display:flex */
+.modal-overlay[hidden] { display: none !important; }
+
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 .modal {
   position: relative;
   width: 100%; max-width: 420px;
+  max-height: calc(100vh - 40px);  /* не выходить за края экрана */
+  overflow-y: auto;                 /* прокрутка внутри модалки    */
   background: var(--surface);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-modal);
