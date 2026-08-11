@@ -9,6 +9,11 @@ const state = {
   user: JSON.parse(localStorage.getItem("cm_user") || "null"),
 };
 
+// Если нет токена — перенаправляем на страницу входа
+if (!state.token) {
+  window.location.replace("/login.html");
+}
+
 // Действие, отложенное до успешного входа (например, "купить", если
 // человек нажал «Купить», не будучи авторизован — после входа сразу
 // выполняем то, что он изначально хотел).
@@ -63,9 +68,10 @@ async function api(path, { method = "GET", body, auth = true, query } = {}) {
   try { data = await res.json(); } catch (_) { /* no body */ }
 
   if (res.status === 401 && auth) {
-    // Токен истёк/невалиден — тихо разлогиниваем и просим войти снова.
-    handleLoggedOut();
-    toast("Сессия истекла — войдите заново.", true);
+    // Токен истёк/невалиден — очищаем и перенаправляем на страницу входа.
+    localStorage.removeItem("cm_token");
+    localStorage.removeItem("cm_user");
+    window.location.replace("/login.html");
   }
 
   if (!res.ok) {
@@ -208,8 +214,7 @@ function handleLoggedOut() {
   state.user = null;
   localStorage.removeItem("cm_token");
   localStorage.removeItem("cm_user");
-  refreshAuthUI();
-  goToView("market"); // приватные разделы больше не должны показывать чужие данные
+  window.location.replace("/login.html");
 }
 
 function refreshAuthUI() {
