@@ -250,13 +250,14 @@ function goToView(view) {
   if (view === "market") loadListings();
   if (view === "listings" && state.token) loadMyListings();
   if (view === "vouchers" && state.token) loadMyVouchers();
+  if (view === "history" && state.token) loadHistory();
 }
 
 document.querySelectorAll("[data-view]").forEach((btn) => {
   btn.addEventListener("click", () => goToView(btn.dataset.view));
 });
 
-/** «Мои объявления» и «Мои векселя» — приватные разделы: если человек не
+/** «Мои объявления», «Мои векселя», «История» — приватные разделы: если человек не
  *  авторизован, вместо контента показываем приглашение войти. */
 function renderAuthGates() {
   const loggedIn = !!state.token;
@@ -264,6 +265,8 @@ function renderAuthGates() {
   document.getElementById("listings-authcontent").hidden = !loggedIn;
   document.getElementById("vouchers-authgate").hidden = loggedIn;
   document.getElementById("vouchers-authcontent").hidden = !loggedIn;
+  document.getElementById("history-authgate").hidden = loggedIn;
+  document.getElementById("history-authcontent").hidden = !loggedIn;
 }
 
 /* ============================================================
@@ -374,26 +377,55 @@ document.getElementById("refresh-listings").addEventListener("click", loadListin
 document.getElementById("apply-browse-filter").addEventListener("click", loadListings);
 
 /* ============================================================
-   ПОДБОР ПРЕДЛОЖЕНИЙ (превью топ-5 ДО покупки) — публично
+   ПОДБОР ПРЕДЛОЖЕНИЙ (превью топ-5 ДО покупки) — аккордеон-карточки
    ============================================================ */
 
-function quoteOfferRow(offer) {
+function quoteOfferCard(offer, idx) {
+  const tags = characteristicsTags(offer.characteristics);
   const constraints = [];
-  if (offer.min_deal_quantity) constraints.push(`от ${offer.min_deal_quantity}`);
-  if (offer.max_deal_quantity) constraints.push(`до ${offer.max_deal_quantity}`);
+  if (offer.min_deal_quantity) constraints.push(`от ${offer.min_deal_quantity} УЕ за сделку`);
+  if (offer.max_deal_quantity) constraints.push(`до ${offer.max_deal_quantity} УЕ за сделку`);
+  const c = offer.characteristics;
+  const details = [
+    c.methodology && `Методология: ${c.methodology}`,
+    c.verifier    && `Верификатор: ${c.verifier}`,
+    c.vintage_year && `Год выпуска: ${c.vintage_year}`,
+    c.country     && `Страна: ${c.country}`,
+    c.issue_date  && `Дата выпуска: ${c.issue_date}`,
+    constraints.length && constraints.join(" · "),
+  ].filter(Boolean);
+
   return `
-    <tr>
-      <td>
-        <div class="quote-seller">${offer.characteristics.project_name || "Без названия проекта"}</div>
-        <div style="font-size:12px;color:var(--ink-soft)">${offer.seller_display_name}</div>
-        <div class="quote-tags">${characteristicsTags(offer.characteristics).map((t) => `<span class="tag">${t}</span>`).join("")}</div>
-      </td>
-      <td class="num">${offer.price_per_unit.toFixed(2)} ₽</td>
-      <td class="num">${offer.quantity}</td>
-      <td class="num">${offer.subtotal.toFixed(2)} ₽</td>
-      <td style="font-size:12px;color:var(--ink-soft)">${constraints.join(" · ") || "—"}</td>
-    </tr>
+    <div class="qi" id="qi-${idx}">
+      <button class="qi-head" type="button" onclick="toggleQi(${idx})">
+        <div class="qi-left">
+          <div class="qi-project">${offer.characteristics.project_name || "Без названия проекта"}</div>
+          <div class="qi-seller">
+            <button class="qi-seller-link" type="button" onclick="event.stopPropagation();openSellerProfile('${offer.seller_id}')">${offer.seller_display_name}</button>
+          </div>
+        </div>
+        <div class="qi-right">
+          <span class="qi-qty">${offer.quantity} УЕ</span>
+          <span class="qi-price">${offer.price_per_unit.toFixed(2)} ₽/ед</span>
+          <span class="qi-subtotal">${offer.subtotal.toFixed(2)} ₽</span>
+          <svg class="qi-chevron" viewBox="0 0 20 20" width="14" height="14"><path d="M5 8l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+      </button>
+      <div class="qi-body" id="qi-body-${idx}" hidden>
+        ${tags.length ? `<div class="quote-tags" style="margin-bottom:8px">${tags.map((t) => `<span class="tag">${t}</span>`).join("")}</div>` : ""}
+        ${details.map((d) => `<div class="qi-detail-row">${d}</div>`).join("")}
+        <button class="btn btn--ghost btn--sm" style="margin-top:10px" type="button"
+          onclick="openSellerProfile('${offer.seller_id}')">Профиль продавца →</button>
+      </div>
+    </div>
   `;
+}
+
+function toggleQi(idx) {
+  const body = document.getElementById(`qi-body-${idx}`);
+  const chevron = document.querySelector(`#qi-${idx} .qi-chevron`);
+  body.hidden = !body.hidden;
+  if (chevron) chevron.style.transform = body.hidden ? "" : "rotate(180deg)";
 }
 
 function renderQuote(quote, mode, requestBody) {
@@ -414,24 +446,22 @@ function renderQuote(quote, mode, requestBody) {
   }
 
   const moreLine = quote.offers_beyond_shown > 0
-    ? `<span class="quote-more">и ещё ${quote.offers_beyond_shown} предложени${quote.offers_beyond_shown === 1 ? "е" : "й"} войдёт в покупку</span>`
-    : `<span class="quote-more">это всё предложения, которые войдут в покупку</span>`;
+    ? `<p class="qi-more">+ ещё ${quote.offers_beyond_shown} источник${quote.offers_beyond_shown > 1 ? "а" : ""} войдут в покупку</p>`
+    : "";
 
   container.hidden = false;
   container.innerHTML = `
     <div class="quote-head">
-      <h3>Лучшие предложения под ваш запрос</h3>
+      <h3>Оптимальная раскладка</h3>
       <div class="quote-total">${quote.total_quantity} УЕ · ${quote.total_price.toFixed(2)} ₽</div>
     </div>
-    <div class="quote-subline">Показаны до 5 самых дешёвых подходящих предложений.</div>
+    <div class="quote-subline">До 5 источников УЕ, из которых сложится покупка — от самых дешёвых к дорогим. Раскройте каждый для деталей.</div>
     ${warning}
-    <table class="quote-table">
-      <thead><tr><th>Предложение</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th>Условия</th></tr></thead>
-      <tbody>${quote.offers.map(quoteOfferRow).join("")}</tbody>
-    </table>
-    <div class="quote-foot">
-      ${moreLine}
-      <button class="btn btn--primary" id="confirm-quote-btn">Подтвердить покупку</button>
+    <div class="qi-list">${quote.offers.map((o, i) => quoteOfferCard(o, i)).join("")}</div>
+    ${moreLine}
+    <div class="quote-foot" style="margin-top:16px">
+      <span></span>
+      <button class="btn btn--primary" id="confirm-quote-btn">Подтвердить и купить ${quote.total_price.toFixed(2)} ₽</button>
     </div>
   `;
 
@@ -461,7 +491,7 @@ async function doConfirmPurchase(mode, requestBody) {
 document.getElementById("find-by-quantity-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.target;
-  const quantity = Number(new FormData(form).get("quantity_needed"));
+  const quantity = parseInt(new FormData(form).get("quantity_needed"), 10);
   const filters = readCharacteristicsFields(form.querySelector("[data-filter-fields]"));
   const body = { quantity_needed: quantity, characteristics: Object.keys(filters).length ? filters : null };
   try {
@@ -480,6 +510,69 @@ document.getElementById("find-by-budget-form").addEventListener("submit", async 
     const quote = await api("/market/quote/invest-amount", { method: "POST", auth: false, body });
     renderQuote(quote, "budget", body);
   } catch (err) { toast(err.message, true); }
+});
+
+/* ============================================================
+   ПРОФИЛЬ ПРОДАВЦА — модальное окно
+   ============================================================ */
+
+async function openSellerProfile(sellerId) {
+  const overlay = document.getElementById("seller-modal-overlay");
+  const content = document.getElementById("seller-modal-content");
+  content.innerHTML = `<p class="empty-row">Загружаю…</p>`;
+  overlay.hidden = false;
+  document.body.style.overflow = "hidden";
+  try {
+    const data = await api(`/listings/seller/${sellerId}`, { auth: false });
+    const typeLabel = data.user_type === "LEGAL_ENTITY" ? "Юридическое лицо" : "Физическое лицо";
+    const listingsHtml = data.active_listings.length
+      ? data.active_listings.map((l) => {
+          const price = l.pricing_mode === "PER_UNIT_MARKUP"
+            ? `${l.price_per_unit.toFixed(2)} ₽/УЕ`
+            : `${l.flat_fee_per_deal.toFixed(2)} ₽/сделку`;
+          const constraints = [];
+          if (l.min_deal_quantity) constraints.push(`от ${l.min_deal_quantity}`);
+          if (l.max_deal_quantity) constraints.push(`до ${l.max_deal_quantity}`);
+          return `
+            <div class="seller-listing-row">
+              <div>
+                <div class="seller-listing-project">${l.characteristics.project_name || "Без названия"}</div>
+                <div class="seller-listing-tags">${characteristicsTags(l.characteristics).map((t) => `<span class="tag">${t}</span>`).join("")}</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0">
+                <div class="seller-listing-price">${price}</div>
+                <div class="seller-listing-qty">${l.remaining_quantity} УЕ</div>
+                ${constraints.length ? `<div class="seller-listing-constraints">${constraints.join(" · ")}</div>` : ""}
+              </div>
+            </div>
+          `;
+        }).join("")
+      : `<p class="empty-row" style="padding:16px 0">Нет активных объявлений.</p>`;
+
+    content.innerHTML = `
+      <div class="seal seal--lg" aria-hidden="true">
+        <svg viewBox="0 0 120 120"><path d="M 60,60 m -46,0 a 46,46 0 1,1 92,0 a 46,46 0 1,1 -92,0"/></svg>
+        <span class="seal-year">УЕ</span>
+      </div>
+      <h2 id="seller-modal-title" style="margin-bottom:4px">${data.display_name}</h2>
+      <div style="font-size:13px;color:var(--ink-soft);margin-bottom:24px">${typeLabel}</div>
+      <div class="eyebrow" style="margin-bottom:10px">Активные объявления</div>
+      <div class="seller-listings">${listingsHtml}</div>
+    `;
+  } catch (err) {
+    content.innerHTML = `<p class="empty-row">Не удалось загрузить профиль: ${err.message}</p>`;
+  }
+}
+
+document.getElementById("close-seller-btn").addEventListener("click", () => {
+  document.getElementById("seller-modal-overlay").hidden = true;
+  document.body.style.overflow = "";
+});
+document.getElementById("seller-modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "seller-modal-overlay") {
+    e.target.hidden = true;
+    document.body.style.overflow = "";
+  }
 });
 
 /* ============================================================
@@ -558,26 +651,38 @@ async function loadMyListings() {
 }
 
 /* ============================================================
-   ПОКУПАТЕЛЬ: мои векселя
+   ПОКУПАТЕЛЬ: мои векселя (только активные / неполностью погашенные)
    ============================================================ */
 
+const VOUCHER_STATUS_LABELS = { ISSUED: "Выпущен", REDEEMED: "Погашен", CANCELLED: "Отменён", PARTIAL: "Частично погашен" };
+const VOUCHER_STATUS_CSS = { ISSUED: "active", REDEEMED: "sold_out", PARTIAL: "paused", CANCELLED: "cancelled" };
+
 function voucherCard(v) {
+  const isRedeemed = v.status === "REDEEMED";
   const wrap = document.createElement("div");
   wrap.className = "card";
+  const compCount = v.components ? v.components.length : "—";
   wrap.innerHTML = `
     <div class="card-stamp">${stampSvg()}</div>
     <div class="card-project">${v.total_quantity} УЕ</div>
-    <div class="card-tags"><span class="tag">${SCENARIO_LABELS[v.scenario] || v.scenario}</span><span class="tag">${v.component_voucher_ids.length} компонент(ов)</span></div>
+    <div class="card-tags">
+      <span class="tag">${SCENARIO_LABELS[v.scenario] || v.scenario}</span>
+      <span class="status-pill status-pill--${VOUCHER_STATUS_CSS[v.status] || "active"}">${VOUCHER_STATUS_LABELS[v.status] || v.status}</span>
+    </div>
     <div class="card-rows">
       <div class="card-row"><span>Стоимость</span><b class="price">${v.total_price.toFixed(2)} ₽</b></div>
       <div class="card-row"><span>Оформлен</span><b>${new Date(v.created_at).toLocaleString("ru-RU")}</b></div>
+      <div class="card-row"><span>Источников</span><b>${compCount}</b></div>
     </div>
     <div class="card-foot">
-      <button class="btn btn--primary btn--sm" data-redeem>Обналичить — зачислить УЕ</button>
+      ${isRedeemed
+        ? `<span style="font-size:12px;color:var(--forest)">✓ УЕ зачислены на баланс</span>`
+        : `<button class="btn btn--primary btn--sm" data-redeem="${v.id}">Обналичить — зачислить УЕ</button>`}
     </div>
   `;
-  wrap.querySelector("[data-redeem]").addEventListener("click", async () => {
-    try { await api(`/vouchers/${v.id}/redeem`, { method: "POST" }); toast("Вексель обналичен — УЕ зачислены на ваш баланс в реестре."); loadMyVouchers(); }
+  const btn = wrap.querySelector("[data-redeem]");
+  if (btn) btn.addEventListener("click", async () => {
+    try { await api(`/vouchers/${btn.dataset.redeem}/redeem`, { method: "POST" }); toast("Вексель обналичен — УЕ зачислены на ваш баланс в реестре."); loadMyVouchers(); }
     catch (err) { toast(err.message, true); }
   });
   return wrap;
@@ -588,10 +693,68 @@ async function loadMyVouchers() {
   grid.innerHTML = `<p class="empty-row">Загружаю…</p>`;
   try {
     const vouchers = await api("/vouchers/mine");
-    if (!vouchers.length) { grid.innerHTML = `<p class="empty-row">У вас пока нет векселей — оформите покупку на витрине.</p>`; return; }
+    const active = vouchers.filter((v) => v.status !== "REDEEMED");
+    if (!active.length) { grid.innerHTML = `<p class="empty-row">Активных векселей нет — все уже обналичены.<br>Историю сделок смотрите во вкладке «История».</p>`; return; }
     grid.innerHTML = "";
-    vouchers.forEach((v) => grid.appendChild(voucherCard(v)));
+    active.forEach((v) => grid.appendChild(voucherCard(v)));
   } catch (err) { grid.innerHTML = `<p class="empty-row">${err.message}</p>`; }
+}
+
+/* ============================================================
+   ИСТОРИЯ СДЕЛОК — все векселя с компонентами и статусами
+   ============================================================ */
+
+function historyCard(v) {
+  const statusCss = VOUCHER_STATUS_CSS[v.status] || "active";
+  const statusLabel = VOUCHER_STATUS_LABELS[v.status] || v.status;
+  const components = (v.components || []).map((c) => `
+    <div class="hc-comp">
+      <div class="hc-comp-left">
+        <button class="qi-seller-link" type="button" onclick="openSellerProfile('${c.seller_id}')">${c.seller_display_name}</button>
+        <span class="hc-comp-project">${c.project_name || "—"}</span>
+      </div>
+      <div class="hc-comp-right">
+        <span class="hc-comp-qty">${c.quantity} УЕ</span>
+        <span class="hc-comp-price">${c.price_per_unit.toFixed(2)} ₽/ед</span>
+        <span class="status-pill status-pill--${c.status === "REDEEMED" ? "sold_out" : "active"}" style="font-size:10px">${c.status === "REDEEMED" ? "Погашен" : "Выпущен"}</span>
+      </div>
+    </div>
+  `).join("");
+
+  return `
+    <div class="history-card">
+      <div class="hc-head">
+        <div class="hc-info">
+          <div class="hc-qty">${v.total_quantity} УЕ</div>
+          <div class="hc-meta">
+            <span class="tag">${SCENARIO_LABELS[v.scenario] || v.scenario}</span>
+            <span class="status-pill status-pill--${statusCss}" style="font-size:10.5px">${statusLabel}</span>
+          </div>
+        </div>
+        <div class="hc-right">
+          <div class="hc-total">${v.total_price.toFixed(2)} ₽</div>
+          <div class="hc-date">${new Date(v.created_at).toLocaleString("ru-RU")}</div>
+        </div>
+      </div>
+      ${v.components && v.components.length ? `
+        <details class="hc-details">
+          <summary>Источники (${v.components.length})</summary>
+          <div class="hc-comps">${components}</div>
+        </details>` : ""}
+    </div>
+  `;
+}
+
+async function loadHistory() {
+  const container = document.getElementById("history-list");
+  container.innerHTML = `<p class="empty-row">Загружаю…</p>`;
+  try {
+    const vouchers = await api("/vouchers/mine");
+    if (!vouchers.length) { container.innerHTML = `<p class="empty-row">Сделок пока нет — оформите покупку на витрине.</p>`; return; }
+    // Сортируем по дате — новые сверху
+    const sorted = [...vouchers].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    container.innerHTML = sorted.map(historyCard).join("");
+  } catch (err) { container.innerHTML = `<p class="empty-row">${err.message}</p>`; }
 }
 
 /* ---------------------------- Инициализация ---------------------------- */

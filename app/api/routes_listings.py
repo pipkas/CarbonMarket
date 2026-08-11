@@ -2,13 +2,14 @@
 Управление объявлениями продавца + публичная витрина рынка (доступна без
 авторизации — покупать/продавать нельзя, но смотреть и сортировать можно).
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from app.core.dependencies import get_current_user
 from app.models.carbon_unit import CarbonUnitCharacteristics
 from app.models.listing import Listing
 from app.models.user import User
-from app.repositories.listing_repo import get_by_seller
+from app.repositories.listing_repo import get_by_seller, get_active_by_seller
 from app.repositories.user_repo import user_repo
 from app.schemas.carbon_unit import CharacteristicsFilterDTO
 from app.schemas.listing import CreateListingRequest, ListingResponse
@@ -75,6 +76,28 @@ def cancel_listing(listing_id: str, user: User = Depends(get_current_user)):
     return _to_response(listing_service.cancel_listing(user, listing_id))
 
 
+class SellerPublicProfile(BaseModel):
+    id: str
+    display_name: str
+    user_type: str
+    active_listings: list[ListingResponse]
+
+
+@router.get("/seller/{seller_id}", response_model=SellerPublicProfile)
+def seller_profile(seller_id: str):
+    """Публичный профиль продавца: имя, тип участника, активные объявления."""
+    seller = user_repo.get(seller_id)
+    if not seller:
+        raise HTTPException(status_code=404, detail="Продавец не найден")
+    active = [_to_response(l) for l in get_active_by_seller(seller_id)]
+    return SellerPublicProfile(
+        id=seller.id,
+        display_name=seller.display_name,
+        user_type=seller.user_type.value,
+        active_listings=active,
+    )
+
+
 @router.get("", response_model=list[ListingResponse])
 def browse(characteristics: CharacteristicsFilterDTO = Depends(), sort_by: str = "price"):
     """
@@ -85,3 +108,4 @@ def browse(characteristics: CharacteristicsFilterDTO = Depends(), sort_by: str =
     has_filter = any(v is not None for v in filt.__dict__.values())
     listings = listing_service.browse_listings(filt if has_filter else None, sort_by=sort_by)
     return [_to_response(l) for l in listings]
+
