@@ -209,6 +209,11 @@ document.addEventListener("click", () => { document.getElementById("user-menu").
 
 document.getElementById("logout-btn").addEventListener("click", handleLoggedOut);
 
+document.getElementById("user-menu-profile").addEventListener("click", () => {
+  document.getElementById("user-menu").hidden = true;
+  goToView("profile");
+});
+
 function handleLoggedOut() {
   state.token = null;
   state.user = null;
@@ -251,6 +256,7 @@ function goToView(view) {
   if (view === "listings" && state.token) loadMyListings();
   if (view === "vouchers" && state.token) loadMyVouchers();
   if (view === "history" && state.token) loadHistory();
+  if (view === "profile" && state.token) loadProfile();
 }
 
 document.querySelectorAll("[data-view]").forEach((btn) => {
@@ -267,6 +273,8 @@ function renderAuthGates() {
   document.getElementById("vouchers-authcontent").hidden = !loggedIn;
   document.getElementById("history-authgate").hidden = loggedIn;
   document.getElementById("history-authcontent").hidden = !loggedIn;
+  document.getElementById("profile-authgate").hidden = loggedIn;
+  document.getElementById("profile-authcontent").hidden = !loggedIn;
 }
 
 /* ============================================================
@@ -309,10 +317,6 @@ function characteristicsTags(c) {
    ВИТРИНА: карточки объявлений (публично)
    ============================================================ */
 
-function stampSvg() {
-  return `<svg viewBox="0 0 120 120"><path d="M 60,60 m -46,0 a 46,46 0 1,1 92,0 a 46,46 0 1,1 -92,0" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="3 5.5" stroke-linecap="round"/></svg>`;
-}
-
 function listingCard(listing) {
   const priceLabel = listing.pricing_mode === "PER_UNIT_MARKUP"
     ? `${listing.price_per_unit.toFixed(2)} ₽ / УЕ`
@@ -326,7 +330,6 @@ function listingCard(listing) {
   const wrap = document.createElement("div");
   wrap.className = "card";
   wrap.innerHTML = `
-    <div class="card-stamp">${stampSvg()}</div>
     <div class="card-project">${listing.characteristics.project_name || "Без названия проекта"}</div>
     <div class="card-seller">Продавец: ${listing.seller_display_name}</div>
     <div class="card-tags">${characteristicsTags(listing.characteristics).map((t) => `<span class="tag">${t}</span>`).join("")}</div>
@@ -445,20 +448,14 @@ function renderQuote(quote, mode, requestBody) {
     warning = `<div class="quote-warning">${quote.leftover_budget.toFixed(2)} ₽ из бюджета останется неизрасходовано — не набирается минимальный объём сделки у оставшихся продавцов.</div>`;
   }
 
-  const moreLine = quote.offers_beyond_shown > 0
-    ? `<p class="qi-more">+ ещё ${quote.offers_beyond_shown} источник${quote.offers_beyond_shown > 1 ? "а" : ""} войдут в покупку</p>`
-    : "";
-
   container.hidden = false;
   container.innerHTML = `
     <div class="quote-head">
       <h3>Оптимальная раскладка</h3>
       <div class="quote-total">${quote.total_quantity} УЕ · ${quote.total_price.toFixed(2)} ₽</div>
     </div>
-    <div class="quote-subline">До 5 источников УЕ, из которых сложится покупка — от самых дешёвых к дорогим. Раскройте каждый для деталей.</div>
     ${warning}
     <div class="qi-list">${quote.offers.map((o, i) => quoteOfferCard(o, i)).join("")}</div>
-    ${moreLine}
     <div class="quote-foot" style="margin-top:16px">
       <span></span>
       <button class="btn btn--primary" id="confirm-quote-btn">Подтвердить и купить ${quote.total_price.toFixed(2)} ₽</button>
@@ -661,9 +658,9 @@ function voucherCard(v) {
   const isRedeemed = v.status === "REDEEMED";
   const wrap = document.createElement("div");
   wrap.className = "card";
+  const isCancelled = v.status === "CANCELLED";
   const compCount = v.components ? v.components.length : "—";
   wrap.innerHTML = `
-    <div class="card-stamp">${stampSvg()}</div>
     <div class="card-project">${v.total_quantity} УЕ</div>
     <div class="card-tags">
       <span class="tag">${SCENARIO_LABELS[v.scenario] || v.scenario}</span>
@@ -677,12 +674,21 @@ function voucherCard(v) {
     <div class="card-foot">
       ${isRedeemed
         ? `<span style="font-size:12px;color:var(--forest)">✓ УЕ зачислены на баланс</span>`
-        : `<button class="btn btn--primary btn--sm" data-redeem="${v.id}">Обналичить — зачислить УЕ</button>`}
+        : isCancelled
+          ? `<span style="font-size:12px;color:var(--ink-soft)">Вексель отменён</span>`
+          : `<button class="btn btn--primary btn--sm" data-redeem="${v.id}">Обналичить — зачислить УЕ</button>
+             <button class="btn btn--ghost btn--sm" data-cancel-voucher="${v.id}">Отменить</button>`}
     </div>
   `;
   const btn = wrap.querySelector("[data-redeem]");
   if (btn) btn.addEventListener("click", async () => {
     try { await api(`/vouchers/${btn.dataset.redeem}/redeem`, { method: "POST" }); toast("Вексель обналичен — УЕ зачислены на ваш баланс в реестре."); loadMyVouchers(); }
+    catch (err) { toast(err.message, true); }
+  });
+  const cancelBtn = wrap.querySelector("[data-cancel-voucher]");
+  if (cancelBtn) cancelBtn.addEventListener("click", async () => {
+    if (!confirm("Отменить вексель? Купленные УЕ вернутся продавцу, деньги за них не будут списаны.")) return;
+    try { await api(`/vouchers/${cancelBtn.dataset.cancelVoucher}/cancel`, { method: "POST" }); toast("Вексель отменён."); loadMyVouchers(); }
     catch (err) { toast(err.message, true); }
   });
   return wrap;
@@ -693,54 +699,59 @@ async function loadMyVouchers() {
   grid.innerHTML = `<p class="empty-row">Загружаю…</p>`;
   try {
     const vouchers = await api("/vouchers/mine");
-    const active = vouchers.filter((v) => v.status !== "REDEEMED");
-    if (!active.length) { grid.innerHTML = `<p class="empty-row">Активных векселей нет — все уже обналичены.<br>Историю сделок смотрите во вкладке «История».</p>`; return; }
+    const active = vouchers.filter((v) => v.status !== "REDEEMED" && v.status !== "CANCELLED");
+    if (!active.length) { grid.innerHTML = `<p class="empty-row">Активных векселей нет — все уже обналичены или отменены.<br>Историю сделок смотрите во вкладке «История».</p>`; return; }
     grid.innerHTML = "";
     active.forEach((v) => grid.appendChild(voucherCard(v)));
   } catch (err) { grid.innerHTML = `<p class="empty-row">${err.message}</p>`; }
 }
 
 /* ============================================================
-   ИСТОРИЯ СДЕЛОК — все векселя с компонентами и статусами
+   ИСТОРИЯ — единая лента активности (покупки, продажи по своим
+   объявлениям, создание/снятие объявлений, обналичивание/отмена)
    ============================================================ */
 
-function historyCard(v) {
-  const statusCss = VOUCHER_STATUS_CSS[v.status] || "active";
-  const statusLabel = VOUCHER_STATUS_LABELS[v.status] || v.status;
-  const components = (v.components || []).map((c) => `
-    <div class="hc-comp">
-      <div class="hc-comp-left">
-        <button class="qi-seller-link" type="button" onclick="openSellerProfile('${c.seller_id}')">${c.seller_display_name}</button>
-        <span class="hc-comp-project">${c.project_name || "—"}</span>
-      </div>
-      <div class="hc-comp-right">
-        <span class="hc-comp-qty">${c.quantity} УЕ</span>
-        <span class="hc-comp-price">${c.price_per_unit.toFixed(2)} ₽/ед</span>
-        <span class="status-pill status-pill--${c.status === "REDEEMED" ? "sold_out" : "active"}" style="font-size:10px">${c.status === "REDEEMED" ? "Погашен" : "Выпущен"}</span>
-      </div>
-    </div>
-  `).join("");
+const ACTIVITY_TYPE_LABELS = {
+  LISTING_CREATED: "Объявление создано",
+  LISTING_CANCELLED: "Объявление снято",
+  SALE: "Продажа — у вас купили",
+  SALE_CANCELLED: "Продажа отменена покупателем",
+  PURCHASE: "Покупка",
+  VOUCHER_REDEEMED: "Вексель обналичен",
+  VOUCHER_CANCELLED: "Покупка отменена",
+};
+const ACTIVITY_TYPE_CSS = {
+  LISTING_CREATED: "active",
+  LISTING_CANCELLED: "cancelled",
+  SALE: "active",
+  SALE_CANCELLED: "cancelled",
+  PURCHASE: "active",
+  VOUCHER_REDEEMED: "sold_out",
+  VOUCHER_CANCELLED: "cancelled",
+};
+
+function activityCard(e) {
+  const css = ACTIVITY_TYPE_CSS[e.type] || "active";
+  const label = ACTIVITY_TYPE_LABELS[e.type] || e.type;
+  const qtyLine = e.quantity != null ? `${e.quantity} УЕ` : label;
+  const amountLine = e.amount != null ? `${e.amount.toFixed(2)} ₽` : "";
+  const sub = [e.project_name, e.counterparty_name].filter(Boolean).join(" · ");
 
   return `
     <div class="history-card">
       <div class="hc-head">
         <div class="hc-info">
-          <div class="hc-qty">${v.total_quantity} УЕ</div>
+          <div class="hc-qty">${qtyLine}</div>
           <div class="hc-meta">
-            <span class="tag">${SCENARIO_LABELS[v.scenario] || v.scenario}</span>
-            <span class="status-pill status-pill--${statusCss}" style="font-size:10.5px">${statusLabel}</span>
+            <span class="status-pill status-pill--${css}" style="font-size:10.5px">${label}</span>
+            ${sub ? `<span class="tag">${sub}</span>` : ""}
           </div>
         </div>
         <div class="hc-right">
-          <div class="hc-total">${v.total_price.toFixed(2)} ₽</div>
-          <div class="hc-date">${new Date(v.created_at).toLocaleString("ru-RU")}</div>
+          ${amountLine ? `<div class="hc-total">${amountLine}</div>` : ""}
+          <div class="hc-date">${new Date(e.created_at).toLocaleString("ru-RU")}</div>
         </div>
       </div>
-      ${v.components && v.components.length ? `
-        <details class="hc-details">
-          <summary>Источники (${v.components.length})</summary>
-          <div class="hc-comps">${components}</div>
-        </details>` : ""}
     </div>
   `;
 }
@@ -749,11 +760,52 @@ async function loadHistory() {
   const container = document.getElementById("history-list");
   container.innerHTML = `<p class="empty-row">Загружаю…</p>`;
   try {
-    const vouchers = await api("/vouchers/mine");
-    if (!vouchers.length) { container.innerHTML = `<p class="empty-row">Сделок пока нет — оформите покупку на витрине.</p>`; return; }
-    // Сортируем по дате — новые сверху
-    const sorted = [...vouchers].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    container.innerHTML = sorted.map(historyCard).join("");
+    const events = await api("/users/me/activity");
+    if (!events.length) { container.innerHTML = `<p class="empty-row">Активности пока нет — купите УЕ на витрине или выставьте своё объявление.</p>`; return; }
+    container.innerHTML = events.map(activityCard).join("");
+  } catch (err) { container.innerHTML = `<p class="empty-row">${err.message}</p>`; }
+}
+
+/* ============================================================
+   ПРОФИЛЬ — денежный баланс и баланс УЕ в реестре
+   ============================================================ */
+
+async function loadProfile() {
+  const container = document.getElementById("profile-content");
+  container.innerHTML = `<p class="empty-row">Загружаю…</p>`;
+  try {
+    const p = await api("/users/me");
+    const money = p.cash_balance.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const total = p.carbon_units_total.toLocaleString("ru-RU");
+    const available = p.carbon_units_available.toLocaleString("ru-RU");
+    const frozen = p.carbon_units_frozen.toLocaleString("ru-RU");
+
+    container.innerHTML = `
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h3>Денежный баланс</h3></div>
+          <div class="profile-figure">${money} ₽</div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Углеродные единицы на балансе</h3></div>
+          <div class="profile-figure">${total} УЕ</div>
+          <div class="card-rows" style="margin-top:14px">
+            <div class="card-row"><span>Доступно</span><b>${available} УЕ</b></div>
+            <div class="card-row"><span>Заморожено под вексели</span><b>${frozen} УЕ</b></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:20px">
+        <div class="panel-head"><h3>Данные аккаунта</h3></div>
+        <div class="card-rows">
+          <div class="card-row"><span>Имя / организация</span><b>${p.display_name}</b></div>
+          <div class="card-row"><span>Тип участника</span><b>${p.user_type === "LEGAL_ENTITY" ? "Юридическое лицо" : "Физическое лицо"}</b></div>
+          <div class="card-row"><span>Email</span><b>${p.email}</b></div>
+          ${p.inn ? `<div class="card-row"><span>ИНН</span><b>${p.inn}</b></div>` : ""}
+          ${p.ogrn ? `<div class="card-row"><span>ОГРН</span><b>${p.ogrn}</b></div>` : ""}
+        </div>
+      </div>
+    `;
   } catch (err) { container.innerHTML = `<p class="empty-row">${err.message}</p>`; }
 }
 

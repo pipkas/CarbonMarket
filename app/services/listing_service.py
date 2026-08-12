@@ -7,9 +7,11 @@
 from datetime import datetime
 
 from app.core.exceptions import InsufficientSellerCapacityError, ListingNotFoundError
+from app.models.activity import ActivityType
 from app.models.carbon_unit import CarbonUnitCharacteristics
 from app.models.listing import Listing, ListingStatus, PricingMode
 from app.models.user import User
+from app.repositories import activity_repo
 from app.repositories.listing_repo import listing_repo, get_active
 from app.services.seller_capacity_service import get_available_for_sale
 
@@ -58,7 +60,15 @@ def create_listing(
         min_deal_quantity=min_deal_quantity,
         max_deal_quantity=max_deal_quantity,
     )
-    return listing_repo.add(listing)
+    listing = listing_repo.add(listing)
+
+    activity_repo.log(
+        seller.id, ActivityType.LISTING_CREATED,
+        quantity=total_quantity,
+        project_name=characteristics.project_name,
+        related_id=listing.id,
+    )
+    return listing
 
 
 def cancel_listing(seller: User, listing_id: str) -> Listing:
@@ -66,7 +76,15 @@ def cancel_listing(seller: User, listing_id: str) -> Listing:
     if not listing or listing.seller_id != seller.id:
         raise ListingNotFoundError(listing_id)
     listing.status = ListingStatus.CANCELLED
-    return listing_repo.update(listing)
+    listing = listing_repo.update(listing)
+
+    activity_repo.log(
+        seller.id, ActivityType.LISTING_CANCELLED,
+        quantity=listing.remaining_quantity,
+        project_name=listing.characteristics.project_name,
+        related_id=listing.id,
+    )
+    return listing
 
 
 def browse_listings(

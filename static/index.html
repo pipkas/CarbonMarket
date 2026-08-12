@@ -30,6 +30,7 @@
       <button class="topnav-item" data-view="listings">Мои объявления</button>
       <button class="topnav-item" data-view="vouchers">Мои векселя</button>
       <button class="topnav-item" data-view="history">История</button>
+      <button class="topnav-item" data-view="profile">Профиль</button>
     </nav>
 
     <div class="auth-area">
@@ -44,6 +45,7 @@
         <div class="user-menu" id="user-menu" hidden>
           <div class="user-menu-name" id="user-menu-name">—</div>
           <div class="user-menu-type" id="user-menu-type">—</div>
+          <button class="user-menu-link" id="user-menu-profile">Мой профиль</button>
           <button class="user-menu-logout" id="logout-btn">Выйти из аккаунта</button>
         </div>
       </div>
@@ -235,10 +237,32 @@
 
     <div id="history-authcontent">
       <p class="panel-desc" style="max-width:60ch;margin-bottom:24px">
-        Все покупки векселей и их обналичивания. Статус «Выпущен» означает,
-        что УЕ заморожены у продавца; «Погашен» — что УЕ уже у вас на балансе.
+        Вся ваша активность на рынке: покупки, продажи по вашим
+        объявлениям, создание и снятие объявлений, обналичивание и отмена
+        векселей — от новых к старым.
       </p>
       <div id="history-list" class="history-list"></div>
+    </div>
+  </section>
+
+  <!-- ---------- ПРОФИЛЬ (требует входа) ---------- -->
+  <section id="view-profile" class="view">
+    <header class="view-head">
+      <div>
+        <div class="eyebrow">Аккаунт</div>
+        <h2>Мой профиль</h2>
+      </div>
+    </header>
+
+    <div id="profile-authgate" class="authgate" hidden>
+      <p>Чтобы видеть свой профиль и баланс, войдите в аккаунт.</p>
+      <button class="btn btn--primary" data-open-auth>Войти или зарегистрироваться</button>
+    </div>
+
+    <div id="profile-authcontent">
+      <div id="profile-content">
+        <p class="empty-row">Загружаю…</p>
+      </div>
     </div>
   </section>
 

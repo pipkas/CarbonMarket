@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import routes_auth, routes_listings, routes_market, routes_vouchers
+from app.api import routes_auth, routes_listings, routes_market, routes_vouchers, routes_users
 from app.config import settings
 from app.core.exceptions import DomainError, InsufficientMarketSupplyError
 from app.models.carbon_unit import CarbonUnitCharacteristics, ProjectType, UnitStatus
@@ -24,6 +24,29 @@ app.include_router(routes_auth.router)
 app.include_router(routes_listings.router)
 app.include_router(routes_market.router)
 app.include_router(routes_vouchers.router)
+app.include_router(routes_users.router)
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """
+    Обычный StaticFiles + запрет кэширования браузером.
+
+    Без сборки/хэширования имён файлов (static/app.js всегда называется
+    одинаково) браузер после деплоя новой версии фронтенда может продолжать
+    использовать старую закэшированную копию app.js/index.html — из-за этого
+    в проде видно поведение "старого" кода (например, обращение к полям
+    ответа API, которые уже переименованы на бэкенде), хотя на сервере
+    лежит актуальный файл. Отключаем кэш для всей статики, чтобы после
+    любого деплоя браузер гарантированно подтягивал свежие app.js/index.html.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
 
 # Статический фронтенд (static/index.html + style.css + app.js) — без
 # сборки, обычный vanilla JS, обращается к API того же origin. Монтируется
@@ -31,7 +54,7 @@ app.include_router(routes_vouchers.router)
 # /listings/..., /market/..., /vouchers/...), зарегистрированные выше,
 # перехватываются раньше и не "затеняются" этим catch-all мемом.
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+app.mount("/", NoCacheStaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
 @app.exception_handler(InsufficientMarketSupplyError)

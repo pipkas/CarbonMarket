@@ -33,6 +33,8 @@ def _build_detail(composite, components) -> CompositeVoucherDetailResponse:
     statuses = {d.status for d in dtos}
     if statuses == {"REDEEMED"}:
         overall = "REDEEMED"
+    elif statuses == {"CANCELLED"}:
+        overall = "CANCELLED"
     elif "REDEEMED" in statuses:
         overall = "PARTIAL"
     else:
@@ -68,3 +70,13 @@ def redeem(composite_id: str, user: User = Depends(get_current_user)):
     а не просто владение векселем (см. voucher_service.redeem_composite_voucher).
     """
     return voucher_service.redeem_composite_voucher(user.id, composite_id)
+
+
+@router.post("/{composite_id}/cancel", response_model=CompositeVoucherResponse)
+def cancel(composite_id: str, user: User = Depends(get_current_user)):
+    """
+    Отмена векселя ДО обналичивания — снимает заморозку УЕ у продавца в
+    реестре и возвращает объём обратно в остаток объявления (см.
+    voucher_service.cancel_composite_voucher).
+    """
+    return voucher_service.cancel_composite_voucher(user.id, composite_id)

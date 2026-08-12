@@ -45,6 +45,31 @@ class DealConstraintViolationError(DomainError):
     http_status = 422
 
 
+class InsufficientFundsError(DomainError):
+    """
+    У покупателя не хватает денег на балансе для оформления сделки.
+    Деньги (как и УЕ у продавца) списываются/зачисляются в момент
+    выпуска векселя, а не при обналичивании.
+    """
+    http_status = 402
+
+    def __init__(self, required: float, available: float):
+        self.required = required
+        self.available = available
+        super().__init__(
+            f"Недостаточно средств: требуется {required:.2f} ₽, доступно {available:.2f} ₽"
+        )
+
+
+class VoucherNotCancellableError(DomainError):
+    """
+    Вексель нельзя отменить: хотя бы один из его компонентов уже обналичен
+    (УЕ реально зачислены на баланс покупателя в реестре) — откатывать
+    такую операцию небезопасно, либо вексель уже был отменён ранее.
+    """
+    http_status = 409
+
+
 class InsufficientMarketSupplyError(DomainError):
     """
     Суммарно по всем подходящим активным объявлениям не набирается

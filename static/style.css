@@ -120,11 +120,18 @@ input, select { font-family: var(--font-body); }
 @keyframes pop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .user-menu-name { font-weight: 600; font-size: 14px; color: var(--forest-deep); }
 .user-menu-type { font-size: 12.5px; color: var(--ink-soft); margin-bottom: 12px; }
+.user-menu-link {
+  width: 100%; text-align: left; font-size: 13px; font-weight: 600;
+  padding: 8px 0; color: var(--forest); border-top: 1px solid var(--line);
+}
+.user-menu-link:hover { text-decoration: underline; }
 .user-menu-logout {
   width: 100%; text-align: left; font-size: 13px; font-weight: 600;
   padding: 8px 0 0; color: var(--brick); border-top: 1px solid var(--line);
 }
 .user-menu-logout:hover { text-decoration: underline; }
+
+.profile-figure { font-family: var(--font-display); font-size: 32px; font-weight: 600; color: var(--forest-deep); }
 
 /* ================= КНОПКИ / ПОЛЯ ================= */
 .btn {
@@ -243,7 +250,6 @@ input, select { font-family: var(--font-body); }
 .quote-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 4px; flex-wrap: wrap; }
 .quote-head h3 { font-size: 17px; }
 .quote-total { font-family: var(--font-mono); font-size: 20px; font-weight: 600; color: var(--forest-deep); }
-.quote-subline { color: var(--ink-soft); font-size: 13px; margin-bottom: 16px; }
 .quote-warning { background: var(--brick-tint); color: var(--brick); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; margin-bottom: 14px; }
 
 .quote-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 18px; }
@@ -260,7 +266,6 @@ input, select { font-family: var(--font-body); }
 /* ---------------- CARDS: LISTINGS / VOUCHERS ---------------- */
 .cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 .card { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 20px 20px 18px; box-shadow: var(--shadow-card); }
-.card-stamp { position: absolute; top: 16px; right: 16px; width: 44px; height: 44px; transform: rotate(-9deg); color: var(--bronze); opacity: .85; }
 .card-project { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--forest-deep); max-width: 76%; margin-bottom: 4px; }
 .card-seller { font-size: 12.5px; color: var(--ink-soft); margin-bottom: 10px; }
 .card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }

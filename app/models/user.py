@@ -27,6 +27,7 @@ class User:
     user_type: UserType
     display_name: str                  # ФИО или название компании
     registry_account_id: str           # счёт в реестре УЕ
+    cash_balance: float = 0.0          # денежный баланс участника (₽), демо-реестр без банка
 
     # Поля, актуальные только для юр. лиц (для физлиц — None)
     inn: str | None = None
@@ -48,6 +49,7 @@ class User:
             user_type=user_type,
             display_name=display_name,
             registry_account_id=f"registry-acc-{uuid.uuid4().hex[:10]}",
+            cash_balance=500_000.0,    # демо: стартовый баланс для новых участников
             inn=inn,
             ogrn=ogrn,
         )

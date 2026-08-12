@@ -26,8 +26,6 @@ from app.services.matching_service import AllocationResult
 
 router = APIRouter(prefix="/market", tags=["market"])
 
-TOP_OFFERS_SHOWN = 5
-
 
 def _filter_or_none(dto) -> CarbonUnitCharacteristics | None:
     if dto is None:
@@ -39,9 +37,8 @@ def _filter_or_none(dto) -> CarbonUnitCharacteristics | None:
 
 
 def _allocation_to_quote(allocation: AllocationResult, *, quantity_mode: bool) -> QuoteResponse:
-    shown = allocation.items[:TOP_OFFERS_SHOWN]
     offers = []
-    for item in shown:
+    for item in allocation.items:
         seller = user_repo.get(item.listing.seller_id)
         offers.append(QuoteOfferDTO(
             listing_id=item.listing.id,
@@ -56,7 +53,7 @@ def _allocation_to_quote(allocation: AllocationResult, *, quantity_mode: bool) -
         ))
     return QuoteResponse(
         offers=offers,
-        offers_beyond_shown=max(0, len(allocation.items) - TOP_OFFERS_SHOWN),
+        offers_beyond_shown=0,
         total_quantity=allocation.total_quantity,
         total_price=allocation.total_price,
         unmet_quantity=allocation.unmet_quantity if quantity_mode else None,
