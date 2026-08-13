@@ -1,8 +1,7 @@
 """
-Покупка углеродных единиц: подбор по объёму, подбор по бюджету, прямая
-покупка по конкретному объявлению — плюс превью ("quote") для первых двух,
-которое можно смотреть без авторизации, чтобы покупатель видел топ
-предложений ДО оформления сделки.
+Покупка векселей: подбор по объёму, подбор по бюджету, прямая покупка
+конкретного объявления — плюс превью ("quote") для первых двух, которое
+можно смотреть без авторизации.
 """
 from fastapi import APIRouter, Depends
 
@@ -15,12 +14,13 @@ from app.repositories.user_repo import user_repo
 from app.schemas.carbon_unit import CharacteristicsFilterDTO
 from app.schemas.market import (
     BuyExactQuantityRequest,
+    BuyListingRequest,
     InvestAmountRequest,
-    ReserveFromListingRequest,
-    CompositeVoucherResponse,
+    PurchaseResultResponse,
     QuoteOfferDTO,
     QuoteResponse,
 )
+from app.schemas.voucher import VoucherResponse
 from app.services import matching_service
 from app.services.matching_service import AllocationResult
 
@@ -42,14 +42,14 @@ def _allocation_to_quote(allocation: AllocationResult, *, quantity_mode: bool) -
         seller = user_repo.get(item.listing.seller_id)
         offers.append(QuoteOfferDTO(
             listing_id=item.listing.id,
+            voucher_id=item.voucher.id,
+            voucher_number=item.voucher.number,
             seller_id=item.listing.seller_id,
             seller_display_name=seller.display_name if seller else "—",
-            characteristics=CharacteristicsFilterDTO(**item.listing.characteristics.__dict__),
+            characteristics=CharacteristicsFilterDTO(**item.voucher.characteristics.__dict__),
+            quantity=item.voucher.quantity,
             price_per_unit=item.price_per_unit,
-            quantity=item.quantity,
-            subtotal=item.subtotal,
-            min_deal_quantity=item.listing.min_deal_quantity,
-            max_deal_quantity=item.listing.max_deal_quantity,
+            fixed_price=item.price,
         ))
     return QuoteResponse(
         offers=offers,
@@ -61,12 +61,19 @@ def _allocation_to_quote(allocation: AllocationResult, *, quantity_mode: bool) -
     )
 
 
+def _purchase_to_response(result) -> PurchaseResultResponse:
+    from app.api.routes_vouchers import _to_response as voucher_to_response
+    return PurchaseResultResponse(
+        vouchers=[voucher_to_response(v) for v in result.vouchers],
+        total_quantity=result.total_quantity,
+        total_price=result.total_price,
+        scenario=result.scenario,
+    )
+
+
 @router.post("/quote/buy-exact-quantity", response_model=QuoteResponse)
 def quote_buy_exact_quantity(payload: BuyExactQuantityRequest):
-    """
-    Публичное превью: из каких предложений сложится покупка нужного
-    количества УЕ, без резервирования и без авторизации.
-    """
+    """Публичное превью: какие именно векселя вошли бы в покупку нужного объёма, без резервирования и без авторизации."""
     allocation = matching_service.preview_buy_exact_quantity(
         quantity_needed=payload.quantity_needed,
         characteristics_filter=_filter_or_none(payload.characteristics),
@@ -84,30 +91,35 @@ def quote_invest_amount(payload: InvestAmountRequest):
     return _allocation_to_quote(allocation, quantity_mode=False)
 
 
-@router.post("/buy-exact-quantity", response_model=CompositeVoucherResponse)
+@router.post("/buy-exact-quantity", response_model=PurchaseResultResponse)
 def buy_exact_quantity(payload: BuyExactQuantityRequest, user: User = Depends(get_current_user)):
     """Оформление покупки нужного объёма — требует авторизации."""
-    return matching_service.buy_exact_quantity(
+    result = matching_service.buy_exact_quantity(
         buyer_id=user.id,
         quantity_needed=payload.quantity_needed,
         characteristics_filter=_filter_or_none(payload.characteristics),
     )
+    return _purchase_to_response(result)
 
 
-@router.post("/invest-amount", response_model=CompositeVoucherResponse)
+@router.post("/invest-amount", response_model=PurchaseResultResponse)
 def invest_amount(payload: InvestAmountRequest, user: User = Depends(get_current_user)):
     """Оформление покупки на заданный бюджет — требует авторизации."""
-    return matching_service.invest_amount(
+    result = matching_service.invest_amount(
         buyer_id=user.id,
         budget_amount=payload.budget_amount,
         characteristics_filter=_filter_or_none(payload.characteristics),
     )
+    return _purchase_to_response(result)
 
 
-@router.post("/reserve-from-listing", response_model=CompositeVoucherResponse)
-def reserve_from_listing(payload: ReserveFromListingRequest, user: User = Depends(get_current_user)):
-    """Прямая покупка по конкретному, самостоятельно выбранному объявлению — требует авторизации."""
+@router.post("/buy-listing", response_model=VoucherResponse)
+def buy_listing(payload: BuyListingRequest, user: User = Depends(get_current_user)):
+    """Прямая покупка конкретного, самостоятельно выбранного объявления — требует авторизации. Вексель покупается целиком."""
+    from app.api.routes_vouchers import _to_response as voucher_to_response
+
     listing = listing_repo.get(payload.listing_id)
     if not listing:
         raise ListingNotFoundError(payload.listing_id)
-    return matching_service.reserve_from_listing(user.id, listing, payload.quantity)
+    voucher = matching_service.buy_listing_direct(user.id, listing)
+    return voucher_to_response(voucher)

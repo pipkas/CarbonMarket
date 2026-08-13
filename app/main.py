@@ -15,8 +15,7 @@ from app.config import settings
 from app.core.exceptions import DomainError, InsufficientMarketSupplyError
 from app.models.carbon_unit import CarbonUnitCharacteristics, ProjectType, UnitStatus
 from app.models.user import UserType
-from app.services import auth_service, listing_service, registry_client as registry_module
-from app.models.listing import PricingMode
+from app.services import auth_service, listing_service, matching_service, registry_client as registry_module, voucher_service
 
 app = FastAPI(title=settings.APP_NAME)
 
@@ -73,12 +72,19 @@ def handle_domain_error(request: Request, exc: DomainError):
 @app.on_event("startup")
 def seed_demo_data():
     """
-    Демо-данные: 4 продавца, 1 покупатель, 20 объявлений с разными
-    проектами, ценообразованием, ограничениями и характеристиками.
-    """
-    from app.models.carbon_unit import ProjectType, UnitStatus
+    Демо-данные: 4 продавца, 2 покупателя, набор проектов с разными
+    характеристиками. Для каждого проекта продавец сначала ВЫПУСКАЕТ
+    (минтит) один или два векселя из своего остатка в реестре, затем
+    выставляет их на продажу за фиксированную цену — так сразу видно,
+    что купить можно только вексель целиком, а не углеродные единицы
+    "по цене за штуку".
 
-    # ── Продавцы ──────────────────────────────────────────────────────────────
+    Отдельно разыгрываем цепочку перепродажи: seller1 минтит вексель,
+    продаёт buyer'у, buyer перепродаёт его дальше buyer2 по более высокой
+    цене — чтобы сразу было что посмотреть в поиске по номеру векселя
+    (виден и первоначальный продавец, и промежуточный держатель).
+    """
+    # ── Продавцы и покупатели ────────────────────────────────────────────────
     seller1 = auth_service.register(
         email="seller@example.com", password="demo1234",
         user_type=UserType.LEGAL_ENTITY, display_name="ООО Зелёный Лес",
@@ -99,27 +105,26 @@ def seed_demo_data():
         inn="7703456789", ogrn="1027700345678",
     )
 
-    auth_service.register(
+    buyer = auth_service.register(
         email="buyer@example.com", password="demo1234",
         user_type=UserType.INDIVIDUAL, display_name="Иван Иванов",
     )
+    buyer2 = auth_service.register(
+        email="buyer2@example.com", password="demo1234",
+        user_type=UserType.LEGAL_ENTITY, display_name="ООО Карбон Трейд",
+        inn="7704567890", ogrn="1027700456789",
+    )
 
-    # ── Характеристики партий (добавляем в псевдо-реестр) ────────────────────
+    # ── Остатки в псевдо-реестре ──────────────────────────────────────────────
     def bal(seller, chars, qty):
-        registry_module.registry_client.seed_demo_balance(
-            seller.registry_account_id, chars, qty
-        )
+        registry_module.registry_client.seed_demo_balance(seller.registry_account_id, chars, qty)
 
-    def lst(seller, chars, qty, mode, base, ppu=None, flat=None, mn=None, mx=None):
-        listing_service.create_listing(
-            seller=seller, characteristics=chars,
-            total_quantity=qty, pricing_mode=mode,
-            base_reference_price=base, price_per_unit=ppu,
-            flat_fee_per_deal=flat, min_deal_quantity=mn, max_deal_quantity=mx,
-        )
-
-    PU = PricingMode.PER_UNIT_MARKUP
-    FF = PricingMode.FLAT_FEE_PER_DEAL
+    # Минтит вексель из остатка продавца и сразу выставляет его на продажу
+    # за фиксированную цену (никаких "цен за единицу" на витрине больше нет).
+    def mint_and_list(seller, chars, qty, fixed_price):
+        voucher = voucher_service.mint_voucher(seller, chars, qty)
+        listing_service.create_listing(seller, voucher.id, fixed_price)
+        return voucher
 
     # ── seller1: лесоклиматика, Россия ────────────────────────────────────────
     c1 = CarbonUnitCharacteristics(
@@ -128,8 +133,8 @@ def seed_demo_data():
         status=UnitStatus.ISSUED,
     )
     bal(seller1, c1, 20_000)
-    lst(seller1, c1, 5_000, PU, 6.0, ppu=7.00, mn=500, mx=2_000)   # #1
-    lst(seller1, c1, 3_000, FF, 6.0, flat=1_200.0, mn=200)          # #2
+    mint_and_list(seller1, c1, 5_000, 35_000.0)     # 7.00 ₽/УЕ
+    mint_and_list(seller1, c1, 3_000, 19_200.0)     # ~6.40 ₽/УЕ
 
     c2 = CarbonUnitCharacteristics(
         project_name="Кедровая тайга — лесовосстановление", project_type=ProjectType.FORESTRY,
@@ -137,8 +142,8 @@ def seed_demo_data():
         country="RU", status=UnitStatus.ISSUED,
     )
     bal(seller1, c2, 8_000)
-    lst(seller1, c2, 4_000, PU, 6.0, ppu=6.50)                      # #3
-    lst(seller1, c2, 2_000, PU, 6.0, ppu=6.20, mn=100, mx=500)      # #4
+    mint_and_list(seller1, c2, 4_000, 26_000.0)     # 6.50 ₽/УЕ
+    mint_and_list(seller1, c2, 2_000, 12_400.0)     # 6.20 ₽/УЕ
 
     # ── seller2: ВИЭ и энергоэффективность ───────────────────────────────────
     c3 = CarbonUnitCharacteristics(
@@ -147,8 +152,8 @@ def seed_demo_data():
         country="RU", status=UnitStatus.ISSUED,
     )
     bal(seller2, c3, 15_000)
-    lst(seller2, c3, 6_000, PU, 5.8, ppu=6.90)                      # #5
-    lst(seller2, c3, 3_000, FF, 5.8, flat=800.0, mx=1_000)          # #6
+    mint_and_list(seller2, c3, 6_000, 41_400.0)     # 6.90 ₽/УЕ
+    mint_and_list(seller2, c3, 1_000, 6_800.0)      # 6.80 ₽/УЕ
 
     c4 = CarbonUnitCharacteristics(
         project_name="Солнечная станция — Крымский п-ов", project_type=ProjectType.RENEWABLE_ENERGY,
@@ -156,8 +161,8 @@ def seed_demo_data():
         country="RU", status=UnitStatus.ISSUED,
     )
     bal(seller2, c4, 10_000)
-    lst(seller2, c4, 4_500, PU, 5.5, ppu=6.30, mn=300)              # #7
-    lst(seller2, c4, 2_000, PU, 5.5, ppu=5.80)                      # #8  ← самые дешёвые
+    mint_and_list(seller2, c4, 4_500, 28_350.0)     # 6.30 ₽/УЕ
+    mint_and_list(seller2, c4, 2_000, 11_600.0)     # 5.80 ₽/УЕ ← самые дешёвые
 
     c5 = CarbonUnitCharacteristics(
         project_name="Модернизация ТЭЦ — снижение выбросов", project_type=ProjectType.ENERGY_EFFICIENCY,
@@ -165,7 +170,7 @@ def seed_demo_data():
         country="RU", status=UnitStatus.ISSUED,
     )
     bal(seller2, c5, 5_000)
-    lst(seller2, c5, 2_500, PU, 5.0, ppu=5.90, mn=100, mx=800)      # #9
+    mint_and_list(seller2, c5, 2_500, 14_750.0)     # 5.90 ₽/УЕ
 
     # ── seller3: Казахстан и Беларусь — улавливание метана ───────────────────
     c6 = CarbonUnitCharacteristics(
@@ -174,8 +179,8 @@ def seed_demo_data():
         country="KZ", status=UnitStatus.ISSUED,
     )
     bal(seller3, c6, 7_000)
-    lst(seller3, c6, 3_500, PU, 7.0, ppu=8.20, mn=200, mx=1_500)    # #10
-    lst(seller3, c6, 2_000, FF, 7.0, flat=2_000.0, mn=500)          # #11
+    mint_and_list(seller3, c6, 3_500, 28_700.0)     # 8.20 ₽/УЕ
+    mint_and_list(seller3, c6, 1_500, 12_300.0)     # 8.20 ₽/УЕ
 
     c7 = CarbonUnitCharacteristics(
         project_name="Полигон ТБО — сбор свалочного газа", project_type=ProjectType.WASTE_MANAGEMENT,
@@ -183,8 +188,8 @@ def seed_demo_data():
         country="BY", status=UnitStatus.ISSUED,
     )
     bal(seller3, c7, 4_000)
-    lst(seller3, c7, 2_000, PU, 6.5, ppu=7.50)                      # #12
-    lst(seller3, c7, 1_000, FF, 6.5, flat=600.0, mn=100, mx=400)    # #13
+    mint_and_list(seller3, c7, 2_000, 15_000.0)     # 7.50 ₽/УЕ
+    mint_and_list(seller3, c7, 1_000, 6_500.0)      # 6.50 ₽/УЕ
 
     # ── seller4: международные проекты — Индия, Бразилия ─────────────────────
     c8 = CarbonUnitCharacteristics(
@@ -193,8 +198,8 @@ def seed_demo_data():
         country="IN", status=UnitStatus.ISSUED,
     )
     bal(seller4, c8, 12_000)
-    lst(seller4, c8, 5_000, PU, 4.5, ppu=5.20, mn=300, mx=2_000)    # #14  ← очень дёшево
-    lst(seller4, c8, 3_000, FF, 4.5, flat=500.0)                     # #15
+    mint_and_list(seller4, c8, 5_000, 26_000.0)     # 5.20 ₽/УЕ ← очень дёшево
+    mint_and_list(seller4, c8, 3_000, 15_000.0)     # 5.00 ₽/УЕ
 
     c9 = CarbonUnitCharacteristics(
         project_name="REDD+ Амазония — защита тропического леса",
@@ -203,8 +208,8 @@ def seed_demo_data():
         country="BR", status=UnitStatus.ISSUED,
     )
     bal(seller4, c9, 20_000)
-    lst(seller4, c9, 8_000, PU, 8.0, ppu=9.50, mn=1_000, mx=3_000)  # #16  ← премиум
-    lst(seller4, c9, 4_000, PU, 8.0, ppu=8.80, mn=500)              # #17
+    mint_and_list(seller4, c9, 8_000, 76_000.0)     # 9.50 ₽/УЕ ← премиум
+    mint_and_list(seller4, c9, 4_000, 35_200.0)     # 8.80 ₽/УЕ
 
     c10 = CarbonUnitCharacteristics(
         project_name="Геотермальная энергия — Исландия", project_type=ProjectType.RENEWABLE_ENERGY,
@@ -212,7 +217,7 @@ def seed_demo_data():
         country="IS", status=UnitStatus.ISSUED,
     )
     bal(seller4, c10, 3_000)
-    lst(seller4, c10, 1_500, PU, 9.0, ppu=10.50)                    # #18  ← самые дорогие
+    mint_and_list(seller4, c10, 1_500, 15_750.0)    # 10.50 ₽/УЕ ← самые дорогие
 
     c11 = CarbonUnitCharacteristics(
         project_name="Утилизация HFC-23 — химзавод Гуанчжоу",
@@ -221,5 +226,24 @@ def seed_demo_data():
         country="CN", status=UnitStatus.ISSUED,
     )
     bal(seller4, c11, 6_000)
-    lst(seller4, c11, 2_500, PU, 6.0, ppu=6.80, mn=200, mx=1_000)   # #19
-    lst(seller4, c11, 1_500, FF, 6.0, flat=900.0, mx=500)           # #20
+    mint_and_list(seller4, c11, 2_500, 17_000.0)    # 6.80 ₽/УЕ
+
+    # ── Демонстрация цепочки перепродажи (для поиска по номеру векселя) ──────
+    c12 = CarbonUnitCharacteristics(
+        project_name="Малая ГЭС — река Катунь", project_type=ProjectType.RENEWABLE_ENERGY,
+        vintage_year=2024, methodology="AMS-I.D", verifier="SGS",
+        country="RU", status=UnitStatus.ISSUED,
+    )
+    bal(seller1, c12, 2_000)
+    chain_voucher = mint_and_list(seller1, c12, 1_000, 6_800.0)   # seller1 выпускает и продаёт за 6 800 ₽
+
+    from app.repositories.listing_repo import get_active_listing_for_voucher
+    first_listing = get_active_listing_for_voucher(chain_voucher.id)
+    matching_service.buy_listing_direct(buyer.id, first_listing)               # buyer покупает у seller1
+
+    listing_service.create_listing(buyer, chain_voucher.id, 7_500.0)           # buyer перепродаёт дороже
+    resale_listing = get_active_listing_for_voucher(chain_voucher.id)
+    matching_service.buy_listing_direct(buyer2.id, resale_listing)             # buyer2 покупает у buyer
+
+    # Итог: вексель chain_voucher.number сейчас у buyer2, история —
+    # seller1 (выпуск) -> buyer (купил за 6 800 ₽) -> buyer2 (купил за 7 500 ₽).

@@ -43,10 +43,13 @@ const STATUS_LABELS = Object.fromEntries(UNIT_STATUSES.filter(([v]) => v));
 const SCENARIO_LABELS = {
   BUY_EXACT_QUANTITY: "Точный объём",
   INVEST_AMOUNT: "Инвестиция по бюджету",
-  CHOOSE_SELLER: "Прямая покупка",
 };
 
-const STATUS_PILL_LABELS = { ACTIVE: "Активно", PAUSED: "Пауза", SOLD_OUT: "Распродано", CANCELLED: "Отменено" };
+const LISTING_STATUS_LABELS = { ACTIVE: "Активно", SOLD: "Продано", CANCELLED: "Отменено" };
+const LISTING_STATUS_CSS = { ACTIVE: "active", SOLD: "sold_out", CANCELLED: "cancelled" };
+
+const VOUCHER_STATUS_LABELS = { ACTIVE: "Активен", REDEEMED: "Погашен" };
+const VOUCHER_STATUS_CSS = { ACTIVE: "active", REDEEMED: "sold_out" };
 
 /* ---------------------------- API-хелпер ---------------------------- */
 
@@ -253,7 +256,7 @@ function goToView(view) {
   document.getElementById(`view-${view}`).classList.add("is-active");
 
   if (view === "market") loadListings();
-  if (view === "listings" && state.token) loadMyListings();
+  if (view === "listings" && state.token) { loadMyUnlistedVouchers(); loadMyListings(); }
   if (view === "vouchers" && state.token) loadMyVouchers();
   if (view === "history" && state.token) loadHistory();
   if (view === "profile" && state.token) loadProfile();
@@ -313,48 +316,50 @@ function characteristicsTags(c) {
   return tags;
 }
 
+/** Кликабельный номер векселя — ведёт на вкладку «Проверить вексель» и сразу ищет его. */
+function voucherNumberBadge(number) {
+  return `<button type="button" class="voucher-number-btn" onclick="openVoucherLookup('${number}')">${number}</button>`;
+}
+
+function openVoucherLookup(number) {
+  goToView("verify");
+  const input = document.querySelector('#verify-form [name="number"]');
+  input.value = number;
+  runVoucherLookup(number);
+}
+
 /* ============================================================
    ВИТРИНА: карточки объявлений (публично)
    ============================================================ */
 
 function listingCard(listing) {
-  const priceLabel = listing.pricing_mode === "PER_UNIT_MARKUP"
-    ? `${listing.price_per_unit.toFixed(2)} ₽ / УЕ`
-    : `${listing.flat_fee_per_deal.toFixed(2)} ₽ комиссия / сделку`;
-
-  const constraints = [];
-  if (listing.min_deal_quantity) constraints.push(`от ${listing.min_deal_quantity}`);
-  if (listing.max_deal_quantity) constraints.push(`до ${listing.max_deal_quantity}`);
-  const constraintLabel = constraints.length ? constraints.join(" · ") + " за сделку" : "без ограничений на сделку";
-
   const wrap = document.createElement("div");
   wrap.className = "card";
   wrap.innerHTML = `
     <div class="card-project">${listing.characteristics.project_name || "Без названия проекта"}</div>
-    <div class="card-seller">Продавец: ${listing.seller_display_name}</div>
+    <div class="card-seller">Продавец: <button type="button" class="qi-seller-link" data-seller>${listing.seller_display_name}</button></div>
+    <div style="margin:2px 0 10px">${voucherNumberBadge(listing.voucher_number)}</div>
     <div class="card-tags">${characteristicsTags(listing.characteristics).map((t) => `<span class="tag">${t}</span>`).join("")}</div>
     <div class="card-rows">
-      <div class="card-row"><span>Цена</span><b class="price">${priceLabel}</b></div>
-      <div class="card-row"><span>Доступно</span><b>${listing.remaining_quantity} УЕ</b></div>
-      <div class="card-row"><span>Условия сделки</span><b>${constraintLabel}</b></div>
+      <div class="card-row"><span>Цена за вексель</span><b class="price">${listing.fixed_price.toFixed(2)} ₽</b></div>
+      <div class="card-row"><span>Объём</span><b>${listing.quantity} УЕ</b></div>
+      <div class="card-row"><span>Цена за единицу</span><b>${listing.price_per_unit.toFixed(2)} ₽/УЕ</b></div>
     </div>
     <div class="card-foot">
-      <input type="number" min="0" step="1" placeholder="кол-во" data-qty>
-      <button class="btn btn--primary btn--sm" data-buy>Купить</button>
+      <button class="btn btn--primary btn--sm" data-buy style="width:100%">Купить вексель целиком — ${listing.fixed_price.toFixed(2)} ₽</button>
     </div>
   `;
   wrap.querySelector("[data-buy]").addEventListener("click", () => {
-    const qty = Number(wrap.querySelector("[data-qty]").value);
-    if (!qty || qty <= 0) { toast("Укажите количество", true); return; }
-    requireAuth(() => doReserveFromListing(listing.id, qty));
+    requireAuth(() => doBuyListing(listing.id));
   });
+  wrap.querySelector("[data-seller]").addEventListener("click", () => openSellerProfile(listing.seller_id));
   return wrap;
 }
 
-async function doReserveFromListing(listingId, qty) {
+async function doBuyListing(listingId) {
   try {
-    const composite = await api("/market/reserve-from-listing", { method: "POST", body: { listing_id: listingId, quantity: qty } });
-    toast(`Куплено ${composite.total_quantity} УЕ за ${composite.total_price.toFixed(2)} ₽. Вексель оформлен — смотрите «Мои векселя».`);
+    const voucher = await api("/market/buy-listing", { method: "POST", body: { listing_id: listingId } });
+    toast(`Вексель ${voucher.number} куплен за ${voucher.price_paid.toFixed(2)} ₽ — смотрите «Мои векселя».`);
     loadListings();
   } catch (err) { toast(err.message, true); }
 }
@@ -385,9 +390,6 @@ document.getElementById("apply-browse-filter").addEventListener("click", loadLis
 
 function quoteOfferCard(offer, idx) {
   const tags = characteristicsTags(offer.characteristics);
-  const constraints = [];
-  if (offer.min_deal_quantity) constraints.push(`от ${offer.min_deal_quantity} УЕ за сделку`);
-  if (offer.max_deal_quantity) constraints.push(`до ${offer.max_deal_quantity} УЕ за сделку`);
   const c = offer.characteristics;
   const details = [
     c.methodology && `Методология: ${c.methodology}`,
@@ -395,14 +397,13 @@ function quoteOfferCard(offer, idx) {
     c.vintage_year && `Год выпуска: ${c.vintage_year}`,
     c.country     && `Страна: ${c.country}`,
     c.issue_date  && `Дата выпуска: ${c.issue_date}`,
-    constraints.length && constraints.join(" · "),
   ].filter(Boolean);
 
   return `
     <div class="qi" id="qi-${idx}">
       <button class="qi-head" type="button" onclick="toggleQi(${idx})">
         <div class="qi-left">
-          <div class="qi-project">${offer.characteristics.project_name || "Без названия проекта"}</div>
+          <div class="qi-project">${offer.characteristics.project_name || "Без названия проекта"} · ${offer.voucher_number}</div>
           <div class="qi-seller">
             <button class="qi-seller-link" type="button" onclick="event.stopPropagation();openSellerProfile('${offer.seller_id}')">${offer.seller_display_name}</button>
           </div>
@@ -410,13 +411,14 @@ function quoteOfferCard(offer, idx) {
         <div class="qi-right">
           <span class="qi-qty">${offer.quantity} УЕ</span>
           <span class="qi-price">${offer.price_per_unit.toFixed(2)} ₽/ед</span>
-          <span class="qi-subtotal">${offer.subtotal.toFixed(2)} ₽</span>
+          <span class="qi-subtotal">${offer.fixed_price.toFixed(2)} ₽</span>
           <svg class="qi-chevron" viewBox="0 0 20 20" width="14" height="14"><path d="M5 8l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </div>
       </button>
       <div class="qi-body" id="qi-body-${idx}" hidden>
         ${tags.length ? `<div class="quote-tags" style="margin-bottom:8px">${tags.map((t) => `<span class="tag">${t}</span>`).join("")}</div>` : ""}
         ${details.map((d) => `<div class="qi-detail-row">${d}</div>`).join("")}
+        <div class="qi-detail-row">Вексель: ${voucherNumberBadge(offer.voucher_number)}</div>
         <button class="btn btn--ghost btn--sm" style="margin-top:10px" type="button"
           onclick="openSellerProfile('${offer.seller_id}')">Профиль продавца →</button>
       </div>
@@ -442,10 +444,10 @@ function renderQuote(quote, mode, requestBody) {
 
   let warning = "";
   if (mode === "quantity" && quote.unmet_quantity > 0) {
-    warning = `<div class="quote-warning">На рынке пока нет достаточного объёма: удастся набрать ${quote.total_quantity} из ${requestBody.quantity_needed} УЕ.</div>`;
+    warning = `<div class="quote-warning">На рынке пока нет достаточного объёма: удастся набрать ${quote.total_quantity} из ${requestBody.quantity_needed} УЕ (векселя неделимы — точное совпадение не всегда возможно).</div>`;
   }
   if (mode === "budget" && quote.leftover_budget > 0) {
-    warning = `<div class="quote-warning">${quote.leftover_budget.toFixed(2)} ₽ из бюджета останется неизрасходовано — не набирается минимальный объём сделки у оставшихся продавцов.</div>`;
+    warning = `<div class="quote-warning">${quote.leftover_budget.toFixed(2)} ₽ из бюджета останется неизрасходовано — оставшиеся векселя дороже, чем этот остаток.</div>`;
   }
 
   container.hidden = false;
@@ -472,8 +474,9 @@ function renderQuote(quote, mode, requestBody) {
 async function doConfirmPurchase(mode, requestBody) {
   const path = mode === "quantity" ? "/market/buy-exact-quantity" : "/market/invest-amount";
   try {
-    const composite = await api(path, { method: "POST", body: requestBody });
-    toast(`Готово: ${composite.total_quantity} УЕ за ${composite.total_price.toFixed(2)} ₽. Вексель оформлен — смотрите «Мои векселя».`);
+    const result = await api(path, { method: "POST", body: requestBody });
+    const numbers = result.vouchers.map((v) => v.number).join(", ");
+    toast(`Готово: ${result.total_quantity} УЕ за ${result.total_price.toFixed(2)} ₽. Куплены вексели: ${numbers} — смотрите «Мои векселя».`);
     document.getElementById("quote-result").hidden = true;
     loadListings();
   } catch (err) {
@@ -523,27 +526,19 @@ async function openSellerProfile(sellerId) {
     const data = await api(`/listings/seller/${sellerId}`, { auth: false });
     const typeLabel = data.user_type === "LEGAL_ENTITY" ? "Юридическое лицо" : "Физическое лицо";
     const listingsHtml = data.active_listings.length
-      ? data.active_listings.map((l) => {
-          const price = l.pricing_mode === "PER_UNIT_MARKUP"
-            ? `${l.price_per_unit.toFixed(2)} ₽/УЕ`
-            : `${l.flat_fee_per_deal.toFixed(2)} ₽/сделку`;
-          const constraints = [];
-          if (l.min_deal_quantity) constraints.push(`от ${l.min_deal_quantity}`);
-          if (l.max_deal_quantity) constraints.push(`до ${l.max_deal_quantity}`);
-          return `
+      ? data.active_listings.map((l) => `
             <div class="seller-listing-row">
               <div>
                 <div class="seller-listing-project">${l.characteristics.project_name || "Без названия"}</div>
+                <div style="margin:3px 0 6px">${voucherNumberBadge(l.voucher_number)}</div>
                 <div class="seller-listing-tags">${characteristicsTags(l.characteristics).map((t) => `<span class="tag">${t}</span>`).join("")}</div>
               </div>
               <div style="text-align:right;flex-shrink:0">
-                <div class="seller-listing-price">${price}</div>
-                <div class="seller-listing-qty">${l.remaining_quantity} УЕ</div>
-                ${constraints.length ? `<div class="seller-listing-constraints">${constraints.join(" · ")}</div>` : ""}
+                <div class="seller-listing-price">${l.fixed_price.toFixed(2)} ₽</div>
+                <div class="seller-listing-qty">${l.quantity} УЕ · ${l.price_per_unit.toFixed(2)} ₽/УЕ</div>
               </div>
             </div>
-          `;
-        }).join("")
+          `).join("")
       : `<p class="empty-row" style="padding:16px 0">Нет активных объявлений.</p>`;
 
     content.innerHTML = `
@@ -573,74 +568,95 @@ document.getElementById("seller-modal-overlay").addEventListener("click", (e) =>
 });
 
 /* ============================================================
-   ПРОДАВЕЦ: создание объявления, список моих объявлений
+   ПРОДАВЕЦ: выпуск векселя, выставление его на продажу, список объявлений
    ============================================================ */
 
-document.getElementById("pricing-mode-select").addEventListener("change", (e) => {
-  const mode = e.target.value;
-  document.querySelectorAll("[data-pricing]").forEach((el) => { el.hidden = el.dataset.pricing !== mode; });
-});
-
 document.getElementById("check-capacity-btn").addEventListener("click", async () => {
-  const container = document.querySelector('[data-filter-fields="create"]');
+  const container = document.querySelector('[data-filter-fields="mint"]');
   const filters = readCharacteristicsFields(container);
   const result = document.getElementById("capacity-result");
   try {
-    const res = await api("/listings/available-capacity", { query: filters });
-    result.textContent = `Доступно для продажи по этим характеристикам: ${res.available_quantity} УЕ.`;
+    const res = await api("/vouchers/mint/available-capacity", { query: filters });
+    result.textContent = `Доступно для выпуска векселя по этим характеристикам: ${res.available_quantity} УЕ.`;
   } catch (err) { result.textContent = err.message; }
 });
 
-document.getElementById("create-listing-form").addEventListener("submit", async (e) => {
+document.getElementById("mint-voucher-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.target;
   const fd = new FormData(form);
-  const characteristics = readCharacteristicsFields(form.querySelector('[data-filter-fields="create"]'));
-  const pricingMode = fd.get("pricing_mode");
-  const body = {
-    characteristics,
-    total_quantity: Number(fd.get("total_quantity")),
-    pricing_mode: pricingMode,
-    base_reference_price: Number(fd.get("base_reference_price")),
-    price_per_unit: pricingMode === "PER_UNIT_MARKUP" ? Number(fd.get("price_per_unit")) : null,
-    flat_fee_per_deal: pricingMode === "FLAT_FEE_PER_DEAL" ? Number(fd.get("flat_fee_per_deal")) : null,
-    min_deal_quantity: fd.get("min_deal_quantity") ? Number(fd.get("min_deal_quantity")) : null,
-    max_deal_quantity: fd.get("max_deal_quantity") ? Number(fd.get("max_deal_quantity")) : null,
-  };
+  const characteristics = readCharacteristicsFields(form.querySelector('[data-filter-fields="mint"]'));
+  const body = { characteristics, quantity: Number(fd.get("quantity")) };
   try {
-    await api("/listings", { method: "POST", body });
-    toast("Объявление выставлено на продажу.");
+    const voucher = await api("/vouchers/mint", { method: "POST", body });
+    toast(`Вексель ${voucher.number} выпущен на ${voucher.quantity} УЕ. Теперь его можно выставить на продажу ниже.`);
     form.reset();
     document.getElementById("capacity-result").textContent = "";
-    loadMyListings();
+    loadMyUnlistedVouchers();
   } catch (err) { toast(err.message, true); }
 });
+
+/** Векселя, которые пользователь держит и которые ещё не выставлены на продажу. */
+async function loadMyUnlistedVouchers() {
+  const container = document.getElementById("my-unlisted-vouchers");
+  container.innerHTML = `<p class="empty-row">Загружаю…</p>`;
+  try {
+    const vouchers = await api("/vouchers/mine");
+    const unlisted = vouchers.filter((v) => v.status === "ACTIVE" && !v.active_listing);
+    if (!unlisted.length) { container.innerHTML = `<p class="empty-row">Нет выпущенных векселей, доступных для выставления — сначала выпустите вексель в шаге 1.</p>`; return; }
+    container.innerHTML = unlisted.map((v) => `
+      <div class="uv-row" data-row="${v.id}">
+        <div class="uv-left">
+          <div class="uv-project">${v.characteristics.project_name || "Без названия"} · ${voucherNumberBadge(v.number)}</div>
+          <div class="uv-meta">${v.quantity} УЕ ${v.price_paid != null ? `· куплен за ${v.price_paid.toFixed(2)} ₽` : "· выпущен вами"}</div>
+        </div>
+        <div class="uv-foot">
+          <input type="number" min="0" step="0.01" placeholder="цена, ₽" data-price>
+          <button class="btn btn--primary btn--sm" data-list-voucher="${v.id}">Выставить</button>
+        </div>
+      </div>
+    `).join("");
+    container.querySelectorAll("[data-list-voucher]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const row = btn.closest("[data-row]");
+        const price = Number(row.querySelector("[data-price]").value);
+        if (!price || price <= 0) { toast("Укажите цену за вексель", true); return; }
+        try {
+          await api("/listings", { method: "POST", body: { voucher_id: btn.dataset.listVoucher, fixed_price: price } });
+          toast("Вексель выставлен на продажу.");
+          loadMyUnlistedVouchers();
+          loadMyListings();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+  } catch (err) { container.innerHTML = `<p class="empty-row">${err.message}</p>`; }
+}
 
 async function loadMyListings() {
   const container = document.getElementById("my-listings-table");
   container.innerHTML = `<p class="empty-row">Загружаю…</p>`;
   try {
     const listings = await api("/listings/mine");
-    if (!listings.length) { container.innerHTML = `<p class="empty-row">Вы ещё не выставляли объявлений — заполните форму выше.</p>`; return; }
+    if (!listings.length) { container.innerHTML = `<p class="empty-row">Вы ещё не выставляли объявлений — выпустите и выставьте вексель выше.</p>`; return; }
     const rows = listings.map((l) => `
       <tr>
+        <td>${voucherNumberBadge(l.voucher_number)}</td>
         <td>${l.characteristics.project_name || "—"}</td>
-        <td class="num">${l.remaining_quantity} / ${l.total_quantity}</td>
-        <td class="num">${l.pricing_mode === "PER_UNIT_MARKUP" ? l.price_per_unit.toFixed(2) + " ₽/УЕ" : l.flat_fee_per_deal.toFixed(2) + " ₽/сделку"}</td>
-        <td class="num">${l.min_deal_quantity ?? "—"} / ${l.max_deal_quantity ?? "—"}</td>
-        <td><span class="status-pill status-pill--${l.status.toLowerCase()}">${STATUS_PILL_LABELS[l.status] || l.status}</span></td>
-        <td>${l.status === "ACTIVE" ? `<button class="btn btn--danger btn--sm" data-cancel="${l.id}">Отменить</button>` : ""}</td>
+        <td class="num">${l.quantity} УЕ</td>
+        <td class="num">${l.fixed_price.toFixed(2)} ₽ <span style="color:var(--ink-soft)">(${l.price_per_unit.toFixed(2)} ₽/УЕ)</span></td>
+        <td><span class="status-pill status-pill--${LISTING_STATUS_CSS[l.status] || "active"}">${LISTING_STATUS_LABELS[l.status] || l.status}</span></td>
+        <td>${l.status === "ACTIVE" ? `<button class="btn btn--danger btn--sm" data-cancel="${l.id}">Снять</button>` : ""}</td>
       </tr>
     `).join("");
     container.innerHTML = `
       <table>
-        <thead><tr><th>Проект</th><th>Остаток / всего</th><th>Цена</th><th>Мин / Макс за сделку</th><th>Статус</th><th></th></tr></thead>
+        <thead><tr><th>Вексель</th><th>Проект</th><th>Объём</th><th>Цена</th><th>Статус</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
     container.querySelectorAll("[data-cancel]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        try { await api(`/listings/${btn.dataset.cancel}`, { method: "DELETE" }); toast("Объявление отменено."); loadMyListings(); }
+        try { await api(`/listings/${btn.dataset.cancel}`, { method: "DELETE" }); toast("Объявление снято с продажи."); loadMyListings(); loadMyUnlistedVouchers(); }
         catch (err) { toast(err.message, true); }
       });
     });
@@ -648,49 +664,71 @@ async function loadMyListings() {
 }
 
 /* ============================================================
-   ПОКУПАТЕЛЬ: мои векселя (только активные / неполностью погашенные)
+   ПОКУПАТЕЛЬ / ДЕРЖАТЕЛЬ: мои векселя — каждый со своим номером
    ============================================================ */
 
-const VOUCHER_STATUS_LABELS = { ISSUED: "Выпущен", REDEEMED: "Погашен", CANCELLED: "Отменён", PARTIAL: "Частично погашен" };
-const VOUCHER_STATUS_CSS = { ISSUED: "active", REDEEMED: "sold_out", PARTIAL: "paused", CANCELLED: "cancelled" };
-
 function voucherCard(v) {
-  const isRedeemed = v.status === "REDEEMED";
   const wrap = document.createElement("div");
   wrap.className = "card";
-  const isCancelled = v.status === "CANCELLED";
-  const compCount = v.components ? v.components.length : "—";
+  const isRedeemed = v.status === "REDEEMED";
+  const origin = v.price_paid != null
+    ? `Куплен за ${v.price_paid.toFixed(2)} ₽`
+    : "Выпущен вами";
+  const historyNote = v.owners_count > 0 ? `Сменил ${v.owners_count} ${v.owners_count === 1 ? "владельца" : "владельцев"}` : "Первый держатель";
+
   wrap.innerHTML = `
-    <div class="card-project">${v.total_quantity} УЕ</div>
+    <div class="card-project">${v.characteristics.project_name || "Без названия проекта"}</div>
+    <div style="margin:2px 0 8px">${voucherNumberBadge(v.number)}</div>
     <div class="card-tags">
-      <span class="tag">${SCENARIO_LABELS[v.scenario] || v.scenario}</span>
       <span class="status-pill status-pill--${VOUCHER_STATUS_CSS[v.status] || "active"}">${VOUCHER_STATUS_LABELS[v.status] || v.status}</span>
+      ${v.active_listing ? `<span class="tag">Выставлен за ${v.active_listing.fixed_price.toFixed(2)} ₽</span>` : ""}
     </div>
     <div class="card-rows">
-      <div class="card-row"><span>Стоимость</span><b class="price">${v.total_price.toFixed(2)} ₽</b></div>
-      <div class="card-row"><span>Оформлен</span><b>${new Date(v.created_at).toLocaleString("ru-RU")}</b></div>
-      <div class="card-row"><span>Источников</span><b>${compCount}</b></div>
+      <div class="card-row"><span>Объём</span><b>${v.quantity} УЕ</b></div>
+      <div class="card-row"><span>Происхождение</span><b>${origin}</b></div>
+      <div class="card-row"><span>История</span><b>${historyNote}</b></div>
+      <div class="card-row"><span>Выпущен</span><b>${new Date(v.created_at).toLocaleDateString("ru-RU")}</b></div>
     </div>
-    <div class="card-foot">
-      ${isRedeemed
-        ? `<span style="font-size:12px;color:var(--forest)">✓ УЕ зачислены на баланс</span>`
-        : isCancelled
-          ? `<span style="font-size:12px;color:var(--ink-soft)">Вексель отменён</span>`
-          : `<button class="btn btn--primary btn--sm" data-redeem="${v.id}">Обналичить — зачислить УЕ</button>
-             <button class="btn btn--ghost btn--sm" data-cancel-voucher="${v.id}">Отменить</button>`}
-    </div>
+    <div class="voucher-card-foot" data-actions></div>
   `;
-  const btn = wrap.querySelector("[data-redeem]");
-  if (btn) btn.addEventListener("click", async () => {
-    try { await api(`/vouchers/${btn.dataset.redeem}/redeem`, { method: "POST" }); toast("Вексель обналичен — УЕ зачислены на ваш баланс в реестре."); loadMyVouchers(); }
-    catch (err) { toast(err.message, true); }
-  });
-  const cancelBtn = wrap.querySelector("[data-cancel-voucher]");
-  if (cancelBtn) cancelBtn.addEventListener("click", async () => {
-    if (!confirm("Отменить вексель? Купленные УЕ вернутся продавцу, деньги за них не будут списаны.")) return;
-    try { await api(`/vouchers/${cancelBtn.dataset.cancelVoucher}/cancel`, { method: "POST" }); toast("Вексель отменён."); loadMyVouchers(); }
-    catch (err) { toast(err.message, true); }
-  });
+
+  const actions = wrap.querySelector("[data-actions]");
+
+  if (isRedeemed) {
+    actions.innerHTML = `<span style="font-size:12px;color:var(--forest)">✓ УЕ зачислены на баланс</span>`;
+  } else if (v.active_listing) {
+    actions.innerHTML = `<button class="btn btn--ghost btn--sm" data-unlist="${v.active_listing.listing_id}">Снять с продажи</button>`;
+    actions.querySelector("[data-unlist]").addEventListener("click", async () => {
+      try { await api(`/listings/${v.active_listing.listing_id}`, { method: "DELETE" }); toast("Снято с продажи."); loadMyVouchers(); }
+      catch (err) { toast(err.message, true); }
+    });
+  } else {
+    actions.innerHTML = `
+      <button class="btn btn--primary btn--sm" data-redeem="${v.id}">Обналичить — зачислить УЕ</button>
+      <div class="voucher-list-row">
+        <input type="number" min="0" step="0.01" placeholder="цена, ₽" data-price>
+        <button class="btn btn--ghost btn--sm" data-list="${v.id}">Продать</button>
+      </div>
+      ${v.price_paid != null ? `<button class="btn btn--ghost btn--sm" data-cancel-purchase="${v.id}">Отменить покупку</button>` : ""}
+    `;
+    actions.querySelector("[data-redeem]").addEventListener("click", async () => {
+      try { await api(`/vouchers/${v.id}/redeem`, { method: "POST" }); toast("Вексель обналичен — УЕ зачислены на ваш баланс в реестре."); loadMyVouchers(); }
+      catch (err) { toast(err.message, true); }
+    });
+    actions.querySelector("[data-list]").addEventListener("click", async () => {
+      const price = Number(actions.querySelector("[data-price]").value);
+      if (!price || price <= 0) { toast("Укажите цену за вексель", true); return; }
+      try { await api("/listings", { method: "POST", body: { voucher_id: v.id, fixed_price: price } }); toast("Вексель выставлен на продажу."); loadMyVouchers(); }
+      catch (err) { toast(err.message, true); }
+    });
+    const cancelBtn = actions.querySelector("[data-cancel-purchase]");
+    if (cancelBtn) cancelBtn.addEventListener("click", async () => {
+      if (!confirm("Отменить покупку? Вексель вернётся прежнему держателю, деньги вернутся вам.")) return;
+      try { await api(`/vouchers/${v.id}/cancel-purchase`, { method: "POST" }); toast("Покупка отменена."); loadMyVouchers(); }
+      catch (err) { toast(err.message, true); }
+    });
+  }
+
   return wrap;
 }
 
@@ -699,12 +737,87 @@ async function loadMyVouchers() {
   grid.innerHTML = `<p class="empty-row">Загружаю…</p>`;
   try {
     const vouchers = await api("/vouchers/mine");
-    const active = vouchers.filter((v) => v.status !== "REDEEMED" && v.status !== "CANCELLED");
-    if (!active.length) { grid.innerHTML = `<p class="empty-row">Активных векселей нет — все уже обналичены или отменены.<br>Историю сделок смотрите во вкладке «История».</p>`; return; }
+    if (!vouchers.length) { grid.innerHTML = `<p class="empty-row">У вас пока нет векселей — купите на витрине или выпустите свой во вкладке «Мои объявления».</p>`; return; }
     grid.innerHTML = "";
-    active.forEach((v) => grid.appendChild(voucherCard(v)));
+    vouchers.forEach((v) => grid.appendChild(voucherCard(v)));
   } catch (err) { grid.innerHTML = `<p class="empty-row">${err.message}</p>`; }
 }
+
+/* ============================================================
+   ПРОВЕРКА ВЕКСЕЛЯ ПО НОМЕРУ — публично, без авторизации
+   ============================================================ */
+
+const TRANSFER_TYPE_LABELS = { MINT: "Выпуск векселя", SALE: "Покупка", CANCELLATION: "Возврат (отмена покупки)" };
+
+function voucherTimelineStep(t, isLast) {
+  const isCancel = t.type === "CANCELLATION";
+  const label = t.type === "MINT"
+    ? `Выпущен продавцом ${t.to_display_name}`
+    : t.type === "SALE"
+      ? `${t.to_display_name} купил у ${t.from_display_name}`
+      : `${t.to_display_name} вернул вексель ${t.from_display_name}`;
+  return `
+    <div class="vp-step">
+      <div class="vp-step-rail">
+        <div class="vp-step-dot${isCancel ? " vp-step-dot--cancel" : ""}"></div>
+        ${isLast ? "" : `<div class="vp-step-line"></div>`}
+      </div>
+      <div class="vp-step-body">
+        <div class="vp-step-label">${TRANSFER_TYPE_LABELS[t.type] || t.type}: ${label}</div>
+        <div class="vp-step-meta">${new Date(t.transferred_at).toLocaleString("ru-RU")}</div>
+        ${t.price != null ? `<div class="vp-step-price">${t.price.toFixed(2)} ₽</div>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderVoucherHistory(data) {
+  const v = data.voucher;
+  const container = document.getElementById("verify-result");
+  container.innerHTML = `
+    <div class="voucher-passport">
+      <div class="vp-head">
+        <div>
+          <div class="vp-number">${v.number}</div>
+          <div class="vp-project">${v.characteristics.project_name || "Без названия проекта"}</div>
+        </div>
+        <span class="status-pill status-pill--${VOUCHER_STATUS_CSS[v.status] || "active"}">${VOUCHER_STATUS_LABELS[v.status] || v.status}</span>
+      </div>
+      <div class="card-tags">${characteristicsTags(v.characteristics).map((t) => `<span class="tag">${t}</span>`).join("")}</div>
+      <div class="card-rows">
+        <div class="card-row"><span>Объём</span><b>${v.quantity} УЕ</b></div>
+        <div class="card-row"><span>Продавец-эмитент</span><b>${v.original_seller_display_name}</b></div>
+        <div class="card-row"><span>Текущий держатель</span><b>${v.current_holder_display_name}</b></div>
+        <div class="card-row"><span>Сменил владельцев</span><b>${v.owners_count}</b></div>
+        ${v.active_listing ? `<div class="card-row"><span>Сейчас продаётся за</span><b class="price">${v.active_listing.fixed_price.toFixed(2)} ₽</b></div>` : ""}
+      </div>
+      <div class="vp-chain">
+        <div class="vp-chain-title">История держателей</div>
+        <div class="vp-timeline">
+          ${data.chain.map((t, i) => voucherTimelineStep(t, i === data.chain.length - 1)).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function runVoucherLookup(number) {
+  const container = document.getElementById("verify-result");
+  container.innerHTML = `<p class="empty-row">Ищу вексель…</p>`;
+  try {
+    const data = await api(`/vouchers/number/${encodeURIComponent(number)}`, { auth: false });
+    renderVoucherHistory(data);
+  } catch (err) {
+    container.innerHTML = `<p class="empty-row">${err.message}</p>`;
+  }
+}
+
+document.getElementById("verify-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const number = new FormData(e.target).get("number").trim();
+  if (!number) return;
+  runVoucherLookup(number);
+});
 
 /* ============================================================
    ИСТОРИЯ — единая лента активности (покупки, продажи по своим
@@ -712,6 +825,7 @@ async function loadMyVouchers() {
    ============================================================ */
 
 const ACTIVITY_TYPE_LABELS = {
+  VOUCHER_MINTED: "Вексель выпущен",
   LISTING_CREATED: "Объявление создано",
   LISTING_CANCELLED: "Объявление снято",
   SALE: "Продажа — у вас купили",
@@ -721,6 +835,7 @@ const ACTIVITY_TYPE_LABELS = {
   VOUCHER_CANCELLED: "Покупка отменена",
 };
 const ACTIVITY_TYPE_CSS = {
+  VOUCHER_MINTED: "active",
   LISTING_CREATED: "active",
   LISTING_CANCELLED: "cancelled",
   SALE: "active",

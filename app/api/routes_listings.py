@@ -1,6 +1,9 @@
 """
 Управление объявлениями продавца + публичная витрина рынка (доступна без
 авторизации — покупать/продавать нельзя, но смотреть и сортировать можно).
+
+Объявление теперь ссылается на конкретный вексель (voucher_id) и содержит
+только fixed_price — см. app/models/listing.py.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -9,12 +12,12 @@ from app.core.dependencies import get_current_user
 from app.models.carbon_unit import CarbonUnitCharacteristics
 from app.models.listing import Listing
 from app.models.user import User
-from app.repositories.listing_repo import get_by_seller, get_active_by_seller
+from app.repositories.listing_repo import get_active, listing_repo
 from app.repositories.user_repo import user_repo
+from app.repositories.voucher_repo import voucher_repo
 from app.schemas.carbon_unit import CharacteristicsFilterDTO
 from app.schemas.listing import CreateListingRequest, ListingResponse
 from app.services import listing_service
-from app.services.seller_capacity_service import get_available_for_sale
 
 router = APIRouter(prefix="/listings", tags=["listings"])
 
@@ -25,50 +28,36 @@ def _to_domain_characteristics(dto: CharacteristicsFilterDTO) -> CarbonUnitChara
 
 def _to_response(listing: Listing) -> ListingResponse:
     seller = user_repo.get(listing.seller_id)
+    voucher = voucher_repo.get(listing.voucher_id)
     return ListingResponse(
         id=listing.id,
+        voucher_id=listing.voucher_id,
+        voucher_number=voucher.number if voucher else "—",
         seller_id=listing.seller_id,
         seller_display_name=seller.display_name if seller else "—",
-        characteristics=CharacteristicsFilterDTO(**listing.characteristics.__dict__),
-        total_quantity=listing.total_quantity,
-        remaining_quantity=listing.remaining_quantity,
-        pricing_mode=listing.pricing_mode,
-        price_per_unit=listing.price_per_unit,
-        flat_fee_per_deal=listing.flat_fee_per_deal,
-        base_reference_price=listing.base_reference_price,
-        min_deal_quantity=listing.min_deal_quantity,
-        max_deal_quantity=listing.max_deal_quantity,
+        characteristics=CharacteristicsFilterDTO(**voucher.characteristics.__dict__) if voucher else CharacteristicsFilterDTO(),
+        quantity=voucher.quantity if voucher else 0.0,
+        fixed_price=listing.fixed_price,
+        price_per_unit=(listing.fixed_price / voucher.quantity) if voucher and voucher.quantity else 0.0,
         status=listing.status,
         created_at=listing.created_at,
     )
-
-
-@router.get("/available-capacity")
-def available_capacity(characteristics: CharacteristicsFilterDTO = Depends(), user: User = Depends(get_current_user)):
-    """Сколько УЕ данных характеристик продавец реально может выставить прямо сейчас."""
-    qty = get_available_for_sale(user.registry_account_id, user.id, _to_domain_characteristics(characteristics))
-    return {"available_quantity": qty}
 
 
 @router.post("", response_model=ListingResponse)
 def create_listing(payload: CreateListingRequest, user: User = Depends(get_current_user)):
     listing = listing_service.create_listing(
         seller=user,
-        characteristics=_to_domain_characteristics(payload.characteristics),
-        total_quantity=payload.total_quantity,
-        pricing_mode=payload.pricing_mode,
-        base_reference_price=payload.base_reference_price,
-        price_per_unit=payload.price_per_unit,
-        flat_fee_per_deal=payload.flat_fee_per_deal,
-        min_deal_quantity=payload.min_deal_quantity,
-        max_deal_quantity=payload.max_deal_quantity,
+        voucher_id=payload.voucher_id,
+        fixed_price=payload.fixed_price,
     )
     return _to_response(listing)
 
 
 @router.get("/mine", response_model=list[ListingResponse])
 def my_listings(user: User = Depends(get_current_user)):
-    return [_to_response(l) for l in get_by_seller(user.id)]
+    listings = listing_repo.filter(lambda l: l.seller_id == user.id)
+    return [_to_response(l) for l in listings]
 
 
 @router.delete("/{listing_id}", response_model=ListingResponse)
@@ -89,7 +78,7 @@ def seller_profile(seller_id: str):
     seller = user_repo.get(seller_id)
     if not seller:
         raise HTTPException(status_code=404, detail="Продавец не найден")
-    active = [_to_response(l) for l in get_active_by_seller(seller_id)]
+    active = [_to_response(l) for l in listing_repo.filter(lambda l: l.seller_id == seller_id) if l.status == "ACTIVE"]
     return SellerPublicProfile(
         id=seller.id,
         display_name=seller.display_name,
@@ -100,12 +89,8 @@ def seller_profile(seller_id: str):
 
 @router.get("", response_model=list[ListingResponse])
 def browse(characteristics: CharacteristicsFilterDTO = Depends(), sort_by: str = "price"):
-    """
-    Публичная витрина — доступна БЕЗ авторизации, покупать нельзя, но
-    смотреть и сортировать может кто угодно.
-    """
+    """Публичная витрина — доступна БЕЗ авторизации, покупать нельзя, но смотреть и сортировать может кто угодно."""
     filt = _to_domain_characteristics(characteristics)
     has_filter = any(v is not None for v in filt.__dict__.values())
     listings = listing_service.browse_listings(filt if has_filter else None, sort_by=sort_by)
     return [_to_response(l) for l in listings]
-

@@ -1,13 +1,12 @@
-"""DTO для операций покупки (сценарии 1, 2, 3)."""
-from datetime import datetime
-
+"""DTO для операций покупки (подбор по количеству, по бюджету, прямая покупка объявления)."""
 from pydantic import BaseModel
 
 from app.schemas.carbon_unit import CharacteristicsFilterDTO
+from app.schemas.voucher import VoucherResponse
 
 
 class BuyExactQuantityRequest(BaseModel):
-    quantity_needed: int       # УЕ — только целое число
+    quantity_needed: float
     characteristics: CharacteristicsFilterDTO | None = None
 
 
@@ -16,86 +15,39 @@ class InvestAmountRequest(BaseModel):
     characteristics: CharacteristicsFilterDTO | None = None
 
 
-class ReserveFromListingRequest(BaseModel):
+class BuyListingRequest(BaseModel):
     listing_id: str
-    quantity: int              # УЕ — только целое число
 
 
 class QuoteOfferDTO(BaseModel):
     """
-    Один пункт превью — конкретное предложение, которое вошло бы в
-    покупку. Возвращается topN (см. QuoteResponse) отсортированными от
-    самых дешёвых, вместе с продавцом и характеристиками, чтобы
-    покупатель мог детально ознакомиться ДО оформления сделки.
+    Один пункт превью — конкретный вексель (через чьё объявление), который
+    вошёл бы в покупку. Возвращается отсортированным от самых дешёвых, до
+    оформления сделки.
     """
     listing_id: str
+    voucher_id: str
+    voucher_number: str
     seller_id: str
     seller_display_name: str
     characteristics: CharacteristicsFilterDTO
-    price_per_unit: float
     quantity: float
-    subtotal: float
-    min_deal_quantity: float | None
-    max_deal_quantity: float | None
+    price_per_unit: float
+    fixed_price: float       # = цена, которую покупатель заплатит за этот вексель целиком
 
 
 class QuoteResponse(BaseModel):
-    """
-    Превью раскладки покупки — считается тем же алгоритмом, что и реальная
-    покупка, но ничего не резервирует и не требует авторизации.
-    """
-    offers: list[QuoteOfferDTO]        # топ (до 5) самых дешёвых предложений, вошедших в раскладку
-    offers_beyond_shown: int           # сколько ещё предложений использовалось бы сверх показанных
+    offers: list[QuoteOfferDTO]
+    offers_beyond_shown: int
     total_quantity: float
     total_price: float
-    unmet_quantity: float | None = None   # только для подбора по количеству: сколько не удалось набрать
-    leftover_budget: float | None = None  # только для подбора по бюджету: сколько денег осталось неизрасходовано
+    unmet_quantity: float | None = None
+    leftover_budget: float | None = None
 
 
-class CompositeVoucherResponse(BaseModel):
-    id: str
-    buyer_id: str
-    component_voucher_ids: list[str]
+class PurchaseResultResponse(BaseModel):
+    """Итог операции покупки — список уже пронумерованных приобретённых векселей."""
+    vouchers: list[VoucherResponse]
     total_quantity: float
     total_price: float
     scenario: str
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-# ---------------------------------------------------------------------------
-# Детальный ответ для истории — включает компоненты с их статусами
-# ---------------------------------------------------------------------------
-
-class SimpleVoucherDTO(BaseModel):
-    id: str
-    seller_id: str
-    seller_display_name: str
-    listing_id: str
-    project_name: str | None
-    quantity: float
-    price_per_unit: float
-    total_price: float
-    status: str          # "ISSUED" | "REDEEMED" | "CANCELLED"
-    created_at: datetime
-    redeemed_at: datetime | None = None
-
-    class Config:
-        from_attributes = True
-
-
-class CompositeVoucherDetailResponse(BaseModel):
-    id: str
-    buyer_id: str
-    total_quantity: float
-    total_price: float
-    scenario: str
-    created_at: datetime
-    components: list[SimpleVoucherDTO]
-    status: str          # "ISSUED" | "REDEEMED" | "PARTIAL"
-
-    class Config:
-        from_attributes = True
-

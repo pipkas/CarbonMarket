@@ -1,22 +1,28 @@
 """
-Тесты сервиса подбора предложений (matching_service), сервиса векселей
-(voucher_service) и создания объявлений (listing_service /
-seller_capacity_service).
-
-Охват соответствует 14 сценариям, описанным в исходной заглушке.
+Тесты сервисов рынка ПОСЛЕ смены модели: продавец выставляет на продажу
+только уже выпущенные (заминченные) векселя по фиксированной цене — не
+углеродные единицы по цене за штуку. Покрывает: voucher_service
+(минт/покупка/обналичивание/отмена покупки), listing_service (создание/
+отмена объявлений на конкретный вексель), matching_service (подбор по
+количеству/бюджету поверх неделимых предложений) и seller_capacity_service.
 """
 import pytest
 
 from app.core.exceptions import (
-    DealConstraintViolationError,
+    InsufficientFundsError,
     InsufficientMarketSupplyError,
     InsufficientSellerCapacityError,
+    TransferNotCancellableError,
+    VoucherAlreadyListedError,
+    VoucherAlreadyRedeemedError,
     VoucherNotFoundError,
+    VoucherNotOwnedError,
 )
 from app.models.carbon_unit import CarbonUnitCharacteristics, ProjectType, UnitStatus
-from app.models.listing import PricingMode
 from app.models.user import UserType
-from app.services import auth_service, listing_service, matching_service, voucher_service
+from app.models.voucher import TransferType, VoucherStatus
+from app.services import auth_service, listing_service, matching_service, seller_capacity_service, voucher_service
+from app.repositories.voucher_repo import get_by_number
 from app.services.registry_client import registry_client
 
 
@@ -24,459 +30,337 @@ from app.services.registry_client import registry_client
 # Вспомогательные функции для создания тестовых данных
 # ---------------------------------------------------------------------------
 
-def make_seller(email: str = "seller@test.com", display_name: str = "Тест-Продавец"):
+def make_user(email: str, display_name: str, legal: bool = True):
     return auth_service.register(
-        email=email,
-        password="pass1234",
-        user_type=UserType.LEGAL_ENTITY,
+        email=email, password="pass1234",
+        user_type=UserType.LEGAL_ENTITY if legal else UserType.INDIVIDUAL,
         display_name=display_name,
-        inn="7701111111",
-        ogrn="1027700000001",
-    )
-
-
-def make_buyer(email: str = "buyer@test.com", display_name: str = "Тест-Покупатель"):
-    return auth_service.register(
-        email=email,
-        password="pass1234",
-        user_type=UserType.INDIVIDUAL,
-        display_name=display_name,
+        inn="7701111111" if legal else None,
+        ogrn="1027700000001" if legal else None,
     )
 
 
 def make_characteristics(project_name: str = "Test Project", project_type=ProjectType.FORESTRY) -> CarbonUnitCharacteristics:
     return CarbonUnitCharacteristics(
-        project_name=project_name,
-        project_type=project_type,
-        vintage_year=2024,
-        country="RU",
-        status=UnitStatus.ISSUED,
+        project_name=project_name, project_type=project_type,
+        vintage_year=2024, country="RU", status=UnitStatus.ISSUED,
     )
 
 
-def seed_seller_balance(seller, characteristics, quantity: float):
-    """Зачисляет УЕ на счёт продавца в псевдо-реестре."""
-    registry_client.seed_demo_balance(seller.registry_account_id, characteristics, quantity)
+def seed_balance(user, characteristics, quantity: float):
+    registry_client.seed_demo_balance(user.registry_account_id, characteristics, quantity)
 
 
-def create_per_unit_listing(seller, characteristics, total_qty: float, price: float,
-                             min_qty=None, max_qty=None):
-    return listing_service.create_listing(
-        seller=seller,
-        characteristics=characteristics,
-        total_quantity=total_qty,
-        pricing_mode=PricingMode.PER_UNIT_MARKUP,
-        base_reference_price=6.0,
-        price_per_unit=price,
-        flat_fee_per_deal=None,
-        min_deal_quantity=min_qty,
-        max_deal_quantity=max_qty,
-    )
+def mint_and_list(seller, characteristics, quantity, price):
+    voucher = voucher_service.mint_voucher(seller, characteristics, quantity)
+    listing = listing_service.create_listing(seller, voucher.id, price)
+    return voucher, listing
 
 
 # ===========================================================================
-# БЛОК 1: buy_exact_quantity / matching_service._allocate (кейсы 1–6)
+# МИНТ: выпуск векселя и доступный остаток
 # ===========================================================================
 
-class TestBuyExactQuantity:
-
-    def test_case1_single_seller_exact_match(self):
-        """Кейс 1: один продавец полностью закрывает потребность."""
-        seller = make_seller()
-        buyer = make_buyer()
+class TestMintVoucher:
+    def test_mint_freezes_registry_and_creates_numbered_voucher(self):
+        seller = make_user("seller@test.com", "Продавец")
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 2_000)
-        create_per_unit_listing(seller, chars, total_qty=1_000, price=7.0)
+        seed_balance(seller, chars, 1000)
 
-        composite = matching_service.buy_exact_quantity(buyer.id, quantity_needed=500)
+        voucher = voucher_service.mint_voucher(seller, chars, 400)
 
-        assert composite.total_quantity == 500
-        assert composite.total_price == pytest.approx(500 * 7.0, abs=0.01)
-        assert composite.buyer_id == buyer.id
+        assert voucher.number.startswith("CM-")
+        assert voucher.quantity == 400
+        assert voucher.original_seller_id == seller.id
+        assert voucher.current_holder_id == seller.id
+        assert voucher.status == VoucherStatus.ACTIVE
 
-    def test_case2_composite_from_multiple_sellers_cheapest_first(self):
-        """
-        Кейс 2: потребность закрывается несколькими продавцами.
-        Дешёвые идут первыми — итоговая цена оптимальная.
-        """
-        seller_cheap = make_seller(email="cheap@test.com", display_name="Дешёвый")
-        seller_exp = make_seller(email="exp@test.com", display_name="Дорогой")
-        buyer = make_buyer()
+        remaining = seller_capacity_service.get_available_to_mint(seller.registry_account_id, chars)
+        assert remaining == pytest.approx(600)
+
+    def test_mint_more_than_available_raises(self):
+        seller = make_user("seller@test.com", "Продавец")
         chars = make_characteristics()
+        seed_balance(seller, chars, 100)
 
-        seed_seller_balance(seller_cheap, chars, 1_000)
-        seed_seller_balance(seller_exp, chars, 1_000)
-        # Дешёвый — 300 УЕ по 5 руб., дорогой — 1000 УЕ по 8 руб.
-        create_per_unit_listing(seller_cheap, chars, total_qty=300, price=5.0)
-        create_per_unit_listing(seller_exp, chars, total_qty=1_000, price=8.0)
+        with pytest.raises(InsufficientSellerCapacityError):
+            voucher_service.mint_voucher(seller, chars, 500)
 
-        composite = matching_service.buy_exact_quantity(buyer.id, quantity_needed=600)
-
-        assert composite.total_quantity == pytest.approx(600, abs=1e-6)
-        # Первые 300 по 5, следующие 300 по 8 = 1500 + 2400 = 3900
-        assert composite.total_price == pytest.approx(300 * 5.0 + 300 * 8.0, abs=0.01)
-        # Два компонента в векселе
-        assert len(composite.component_voucher_ids) == 2
-
-    def test_case3_skip_listing_when_min_qty_not_satisfiable(self):
-        """
-        Кейс 3: min_deal_quantity одного объявления больше остатка потребности —
-        алгоритм пропускает его и добирает у следующего продавца.
-        """
-        seller_a = make_seller(email="a@test.com", display_name="Продавец А")
-        seller_b = make_seller(email="b@test.com", display_name="Продавец Б")
-        buyer = make_buyer()
+    def test_each_mint_gets_a_unique_sequential_number(self):
+        seller = make_user("seller@test.com", "Продавец")
         chars = make_characteristics()
+        seed_balance(seller, chars, 1000)
 
-        seed_seller_balance(seller_a, chars, 500)
-        seed_seller_balance(seller_b, chars, 500)
-
-        # Продавец А (дешевле): min=200, нам нужно добрать 100 — не влезает, пропустим
-        create_per_unit_listing(seller_a, chars, total_qty=200, price=5.0, min_qty=200)
-        # Продавец Б (дороже): без минимума
-        create_per_unit_listing(seller_b, chars, total_qty=500, price=8.0)
-
-        # Нужно 100 УЕ: min у А=200 > 100, но upper_bound А тоже =200, поэтому
-        # алгоритм возьмёт у А min=200 (>= 200 <= upper_bound=200 — условие выполнено)
-        composite = matching_service.buy_exact_quantity(buyer.id, quantity_needed=100)
-
-        # Алгоритм: take=100 < min=200, но min(200)<=upper_bound(200) → take=200
-        assert composite.total_quantity == pytest.approx(200, abs=1e-6)
-
-    def test_case3_skip_listing_when_min_exceeds_upper_bound(self):
-        """
-        Кейс 3 (вариант): после частичных продаж remaining_quantity < min_deal_quantity
-        — объявление пропускается, потребность покрывается следующим.
-        Симулируем «прошедшие продажи», напрямую уменьшив remaining_quantity.
-        """
-        from app.repositories.listing_repo import listing_repo as _listing_repo
-
-        seller_a = make_seller(email="a@test.com", display_name="Продавец А")
-        seller_b = make_seller(email="b@test.com", display_name="Продавец Б")
-        buyer = make_buyer()
-        chars = make_characteristics()
-
-        seed_seller_balance(seller_a, chars, 500)
-        seed_seller_balance(seller_b, chars, 500)
-
-        # У А: total=500, min=100. Симулируем частичные продажи → remaining=50 < min=100
-        listing_a = create_per_unit_listing(seller_a, chars, total_qty=500, price=5.0, min_qty=100)
-        listing_a.remaining_quantity = 50  # имитируем состояние после частичных продаж
-        _listing_repo.update(listing_a)
-
-        create_per_unit_listing(seller_b, chars, total_qty=500, price=8.0)
-
-        composite = matching_service.buy_exact_quantity(buyer.id, quantity_needed=100)
-
-        assert composite.total_quantity == pytest.approx(100, abs=1e-6)
-        # Взяли только у Б (А пропустили: remaining=50 < min=100)
-        assert len(composite.component_voucher_ids) == 1
-
-    def test_case4_max_deal_quantity_limits_single_transaction(self):
-        """
-        Кейс 4: max_deal_quantity ограничивает объём одной сделки.
-        Алгоритм берёт max от первого продавца, остальное — у второго.
-        """
-        seller_a = make_seller(email="a@test.com", display_name="Продавец А")
-        seller_b = make_seller(email="b@test.com", display_name="Продавец Б")
-        buyer = make_buyer()
-        chars = make_characteristics()
-
-        seed_seller_balance(seller_a, chars, 1_000)
-        seed_seller_balance(seller_b, chars, 1_000)
-
-        # Продавец А: max=300 (т.е. за одну сделку не больше 300)
-        create_per_unit_listing(seller_a, chars, total_qty=1_000, price=5.0, max_qty=300)
-        create_per_unit_listing(seller_b, chars, total_qty=1_000, price=8.0)
-
-        composite = matching_service.buy_exact_quantity(buyer.id, quantity_needed=500)
-
-        # 300 у А, 200 у Б
-        assert composite.total_quantity == pytest.approx(500, abs=1e-6)
-        assert composite.total_price == pytest.approx(300 * 5.0 + 200 * 8.0, abs=0.01)
-
-    def test_case5_insufficient_supply_raises_error_with_best_available(self):
-        """
-        Кейс 5: суммарно на рынке меньше запрошенного —
-        InsufficientMarketSupplyError с корректным best_available.
-        """
-        seller = make_seller()
-        buyer = make_buyer()
-        chars = make_characteristics()
-
-        seed_seller_balance(seller, chars, 500)
-        create_per_unit_listing(seller, chars, total_qty=300, price=7.0)
-
-        with pytest.raises(InsufficientMarketSupplyError) as exc_info:
-            matching_service.buy_exact_quantity(buyer.id, quantity_needed=1_000)
-
-        err = exc_info.value
-        assert err.requested == 1_000
-        assert err.best_available == pytest.approx(300, abs=1e-6)
-
-    def test_case6_characteristics_filter_excludes_wrong_projects(self):
-        """
-        Кейс 6: фильтр по project_name отсекает неподходящие объявления.
-        """
-        seller_x = make_seller(email="x@test.com", display_name="Продавец X")
-        seller_y = make_seller(email="y@test.com", display_name="Продавец Y")
-        buyer = make_buyer()
-
-        chars_x = make_characteristics(project_name="Project X")
-        chars_y = make_characteristics(project_name="Project Y")
-
-        seed_seller_balance(seller_x, chars_x, 1_000)
-        seed_seller_balance(seller_y, chars_y, 1_000)
-        create_per_unit_listing(seller_x, chars_x, total_qty=500, price=7.0)
-        create_per_unit_listing(seller_y, chars_y, total_qty=500, price=6.0)  # дешевле!
-
-        filter_ = CarbonUnitCharacteristics(project_name="Project X")
-        composite = matching_service.buy_exact_quantity(buyer.id, quantity_needed=100, characteristics_filter=filter_)
-
-        # Должны были взять только у X, несмотря на то что Y дешевле
-        assert composite.total_quantity == pytest.approx(100, abs=1e-6)
-        # Проверяем по цене: взяли у X по 7.0
-        assert composite.total_price == pytest.approx(100 * 7.0, abs=0.01)
+        v1 = voucher_service.mint_voucher(seller, chars, 100)
+        v2 = voucher_service.mint_voucher(seller, chars, 100)
+        assert v1.number != v2.number
 
 
 # ===========================================================================
-# БЛОК 2: invest_amount (кейсы 7–9)
+# ЛИСТИНГ: можно выставить только вексель, которым владеешь
 # ===========================================================================
 
-class TestInvestAmount:
-
-    def test_case7_entire_budget_on_one_listing(self):
-        """Кейс 7: весь бюджет тратится на одно объявление."""
-        seller = make_seller()
-        buyer = make_buyer()
+class TestListing:
+    def test_only_current_holder_can_list(self):
+        seller = make_user("seller@test.com", "Продавец")
+        stranger = make_user("stranger@test.com", "Чужой")
         chars = make_characteristics()
+        seed_balance(seller, chars, 1000)
+        voucher = voucher_service.mint_voucher(seller, chars, 100)
 
-        seed_seller_balance(seller, chars, 1_000)
-        create_per_unit_listing(seller, chars, total_qty=1_000, price=5.0)
+        with pytest.raises(VoucherNotOwnedError):
+            listing_service.create_listing(stranger, voucher.id, 900.0)
 
-        composite = matching_service.invest_amount(buyer.id, budget_amount=500.0)
-
-        expected_qty = 500.0 / 5.0  # = 100 УЕ
-        assert composite.total_quantity == pytest.approx(expected_qty, abs=1e-6)
-        assert composite.total_price == pytest.approx(500.0, abs=0.01)
-
-    def test_case8_budget_distributed_cheapest_first(self):
-        """Кейс 8: бюджет распределяется от дешёвых к дорогим."""
-        seller_cheap = make_seller(email="cheap@test.com", display_name="Дешёвый")
-        seller_exp = make_seller(email="exp@test.com", display_name="Дорогой")
-        buyer = make_buyer()
+    def test_cannot_list_same_voucher_twice(self):
+        seller = make_user("seller@test.com", "Продавец")
         chars = make_characteristics()
+        seed_balance(seller, chars, 1000)
+        voucher, _ = mint_and_list(seller, chars, 100, 900.0)
 
-        seed_seller_balance(seller_cheap, chars, 500)
-        seed_seller_balance(seller_exp, chars, 500)
-        # Дешёвый: 50 УЕ по 4 руб. (итого 200 руб.)
-        create_per_unit_listing(seller_cheap, chars, total_qty=50, price=4.0)
-        # Дорогой: 500 УЕ по 10 руб.
-        create_per_unit_listing(seller_exp, chars, total_qty=500, price=10.0)
+        with pytest.raises(VoucherAlreadyListedError):
+            listing_service.create_listing(seller, voucher.id, 950.0)
 
-        # Бюджет 300 руб.: сначала все 50 у дешёвого (200 руб.), потом 10 у дорогого (100 руб.)
-        composite = matching_service.invest_amount(buyer.id, budget_amount=300.0)
-
-        assert composite.total_quantity == pytest.approx(50 + 10, abs=1e-6)
-        assert composite.total_price == pytest.approx(200.0 + 100.0, abs=0.01)
-        assert len(composite.component_voucher_ids) == 2
-
-    def test_case9_leftover_budget_not_spent_when_min_qty_not_met(self):
-        """
-        Кейс 9: остаток бюджета после первого продавца не влезает в min_deal_quantity
-        второго — тихо остаётся неизрасходованным (не выбрасывает исключение).
-        Сценарий: бюджет=1000, продавец А (без min) — дешевле, истощается за 600 руб.
-        Оставшиеся 400 руб. у продавца Б с min=100 и ценой 10/ед.
-        — можно взять 40 УЕ, но 40 < min=100 → skip → leftover=400 руб.
-        """
-        seller_a = make_seller(email="a@test.com", display_name="Продавец А")
-        seller_b = make_seller(email="b@test.com", display_name="Продавец Б")
-        buyer = make_buyer()
+    def test_cancelling_listing_allows_relisting(self):
+        seller = make_user("seller@test.com", "Продавец")
         chars = make_characteristics()
+        seed_balance(seller, chars, 1000)
+        voucher, listing = mint_and_list(seller, chars, 100, 900.0)
 
-        seed_seller_balance(seller_a, chars, 500)
-        seed_seller_balance(seller_b, chars, 1_000)
-        # Продавец А: 200 УЕ по 3 руб., без min (алгоритм возьмёт их первыми — дешевле)
-        create_per_unit_listing(seller_a, chars, total_qty=200, price=3.0)
-        # Продавец Б: много УЕ по 10 руб., min=100
-        create_per_unit_listing(seller_b, chars, total_qty=1_000, price=10.0, min_qty=100)
-
-        # Бюджет 1000: 200*3=600 уходит на А, остаток=400 → 40 УЕ у Б < min=100 → skip
-        composite = matching_service.invest_amount(buyer.id, budget_amount=1_000.0)
-
-        # Купили только у А — ошибки нет, leftover просто не тратится
-        assert composite is not None
-        assert composite.total_quantity == pytest.approx(200, abs=1e-6)
-        assert composite.total_price == pytest.approx(600.0, abs=0.01)
-
-
-# Дополнительный тест: invest_amount с нулевым рынком — явная ошибка
-class TestInvestAmountEdgeCases:
-
-    def test_invest_amount_empty_market_raises_error(self):
-        """invest_amount без предложений → InsufficientMarketSupplyError."""
-        buyer = make_buyer()
-
-        with pytest.raises(InsufficientMarketSupplyError):
-            matching_service.invest_amount(buyer.id, budget_amount=1_000.0)
-
-    def test_invest_amount_leftover_is_silent(self):
-        """
-        Если бюджет не влезает в min_deal_quantity — исключение,
-        т.к. items остаются пустыми.
-        """
-        seller = make_seller()
-        buyer = make_buyer()
-        chars = make_characteristics()
-
-        seed_seller_balance(seller, chars, 1_000)
-        # min=100, бюджет=500, цена=10 → можно взять 50 < 100 → skip → items=[]
-        create_per_unit_listing(seller, chars, total_qty=1_000, price=10.0, min_qty=100)
-
-        with pytest.raises(InsufficientMarketSupplyError):
-            matching_service.invest_amount(buyer.id, budget_amount=500.0)
+        listing_service.cancel_listing(seller, listing.id)
+        new_listing = listing_service.create_listing(seller, voucher.id, 950.0)
+        assert new_listing.fixed_price == 950.0
 
 
 # ===========================================================================
-# БЛОК 3: voucher_service (кейсы 10–12)
+# ПОКУПКА: вексель неделим, продаётся целиком за фиксированную цену
 # ===========================================================================
 
-class TestVoucherService:
-
-    def test_case10_issue_simple_voucher_freezes_registry_units(self):
-        """
-        Кейс 10: issue_simple_voucher замораживает УЕ в реестре —
-        available_quantity уменьшается сразу после выпуска.
-        """
-        seller = make_seller()
+class TestBuyListing:
+    def test_buy_transfers_ownership_and_money(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 1_000)
-        listing = create_per_unit_listing(seller, chars, total_qty=1_000, price=7.0)
+        seed_balance(seller, chars, 1000)
+        voucher, listing = mint_and_list(seller, chars, 100, 900.0)
 
-        buyer = make_buyer()
-        qty_to_buy = 400.0
+        seller_cash_before = seller.cash_balance
+        buyer_cash_before = buyer.cash_balance
 
-        # Баланс до
-        batches_before = registry_client.get_balance(seller.registry_account_id, chars)
-        available_before = sum(b.available_quantity for b in batches_before)
+        bought = matching_service.buy_listing_direct(buyer.id, listing)
 
-        voucher_service.issue_simple_voucher(listing, buyer.id, qty_to_buy)
+        assert bought.current_holder_id == buyer.id
+        assert buyer.cash_balance == pytest.approx(buyer_cash_before - 900.0)
+        assert seller.cash_balance == pytest.approx(seller_cash_before + 900.0)
 
-        batches_after = registry_client.get_balance(seller.registry_account_id, chars)
-        available_after = sum(b.available_quantity for b in batches_after)
-
-        assert available_after == pytest.approx(available_before - qty_to_buy, abs=1e-6)
-
-    def test_case11_redeem_composite_voucher_transfers_units_to_buyer(self):
-        """
-        Кейс 11: redeem_composite_voucher переносит УЕ на баланс покупателя.
-        После обналичивания get_balance(buyer_account) содержит нужное количество.
-        """
-        seller = make_seller()
-        buyer = make_buyer()
+    def test_cannot_buy_own_listing(self):
+        seller = make_user("seller@test.com", "Продавец")
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 1_000)
-        listing = create_per_unit_listing(seller, chars, total_qty=1_000, price=7.0)
+        seed_balance(seller, chars, 1000)
+        _, listing = mint_and_list(seller, chars, 100, 900.0)
 
-        qty = 300.0
-        simple_v = voucher_service.issue_simple_voucher(listing, buyer.id, qty)
-        composite = voucher_service.build_composite_voucher(buyer.id, [simple_v], scenario="TEST")
+        with pytest.raises(VoucherNotOwnedError):
+            matching_service.buy_listing_direct(seller.id, listing)
 
-        # До обналичивания у покупателя нет УЕ
-        buyer_batches_before = registry_client.get_balance(buyer.registry_account_id)
-        assert sum(b.quantity for b in buyer_batches_before) == pytest.approx(0, abs=1e-6)
-
-        voucher_service.redeem_composite_voucher(buyer.id, composite.id)
-
-        buyer_batches_after = registry_client.get_balance(buyer.registry_account_id)
-        total_buyer_qty = sum(b.quantity for b in buyer_batches_after)
-        assert total_buyer_qty == pytest.approx(qty, abs=1e-6)
-
-    def test_case12_redeem_wrong_buyer_raises_voucher_not_found(self):
-        """
-        Кейс 12: попытка обналичить чужой composite_voucher → VoucherNotFoundError.
-        """
-        seller = make_seller()
-        buyer = make_buyer()
-        intruder = make_buyer(email="bad@test.com", display_name="Злоумышленник")
+    def test_insufficient_funds_raises(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
+        buyer.cash_balance = 10.0
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 1_000)
-        listing = create_per_unit_listing(seller, chars, total_qty=1_000, price=7.0)
+        seed_balance(seller, chars, 1000)
+        _, listing = mint_and_list(seller, chars, 100, 900.0)
 
-        simple_v = voucher_service.issue_simple_voucher(listing, buyer.id, 100.0)
-        composite = voucher_service.build_composite_voucher(buyer.id, [simple_v], scenario="TEST")
+        with pytest.raises(InsufficientFundsError):
+            matching_service.buy_listing_direct(buyer.id, listing)
+
+    def test_resold_voucher_cannot_be_bought_again_from_stale_listing(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer1 = make_user("buyer1@test.com", "Покупатель 1", legal=False)
+        buyer2 = make_user("buyer2@test.com", "Покупатель 2", legal=False)
+        chars = make_characteristics()
+        seed_balance(seller, chars, 1000)
+        voucher, listing = mint_and_list(seller, chars, 100, 900.0)
+
+        matching_service.buy_listing_direct(buyer1.id, listing)
 
         with pytest.raises(VoucherNotFoundError):
-            voucher_service.redeem_composite_voucher(intruder.id, composite.id)
+            matching_service.buy_listing_direct(buyer2.id, listing)
 
 
 # ===========================================================================
-# БЛОК 4: listing_service / seller_capacity_service (кейсы 13–14)
+# ЦЕПОЧКА ПЕРЕПРОДАЖ: главное новое требование — история по номеру векселя
 # ===========================================================================
 
-class TestListingService:
-
-    def test_case13_seller_cannot_list_more_than_registry_balance(self):
-        """
-        Кейс 13: продавец не может выставить объявление на объём,
-        превышающий его реальный остаток в реестре.
-        """
-        seller = make_seller()
+class TestOwnershipChain:
+    def test_chain_shows_original_seller_and_all_intermediate_holders(self):
+        seller = make_user("seller@test.com", "Первый продавец")
+        buyer1 = make_user("buyer1@test.com", "Держатель 1", legal=False)
+        buyer2 = make_user("buyer2@test.com", "Держатель 2", legal=False)
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 500)  # в реестре только 500
+        seed_balance(seller, chars, 1000)
 
-        with pytest.raises(InsufficientSellerCapacityError):
-            create_per_unit_listing(seller, chars, total_qty=1_000, price=7.0)  # запрашиваем 1000
+        voucher, listing1 = mint_and_list(seller, chars, 100, 900.0)
+        matching_service.buy_listing_direct(buyer1.id, listing1)
 
-    def test_case14_seller_cannot_double_list_same_units(self):
-        """
-        Кейс 14: продавец не может выставить второе объявление, которое
-        в сумме с первым (активным) превышает его реальный остаток.
-        """
-        seller = make_seller()
+        listing2 = listing_service.create_listing(buyer1, voucher.id, 1000.0)
+        matching_service.buy_listing_direct(buyer2.id, listing2)
+
+        chain = voucher_service.get_ownership_chain(voucher.id)
+        assert [t.type for t in chain] == [TransferType.MINT, TransferType.SALE, TransferType.SALE]
+        assert chain[0].to_user_id == seller.id
+        assert chain[1].from_user_id == seller.id and chain[1].to_user_id == buyer1.id and chain[1].price == 900.0
+        assert chain[2].from_user_id == buyer1.id and chain[2].to_user_id == buyer2.id and chain[2].price == 1000.0
+
+        refreshed = get_by_number(voucher.number)
+        assert refreshed.current_holder_id == buyer2.id
+        assert refreshed.original_seller_id == seller.id
+
+    def test_lookup_by_number_finds_the_right_voucher(self):
+        seller = make_user("seller@test.com", "Продавец")
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 1_000)
+        seed_balance(seller, chars, 1000)
+        voucher = voucher_service.mint_voucher(seller, chars, 100)
 
-        # Первое объявление: 700 УЕ — OK
-        create_per_unit_listing(seller, chars, total_qty=700, price=7.0)
+        found = get_by_number(voucher.number)
+        assert found is not None
+        assert found.id == voucher.id
 
-        # Второе объявление: 400 УЕ — итого 1100 > 1000 → ошибка
-        with pytest.raises(InsufficientSellerCapacityError):
-            create_per_unit_listing(seller, chars, total_qty=400, price=7.0)
+        assert get_by_number("CM-999999") is None
 
-    def test_case14_second_listing_within_remaining_capacity_is_ok(self):
-        """
-        Кейс 14 (граничное): второе объявление, не превышающее остаток, создаётся.
-        """
-        seller = make_seller()
+
+# ===========================================================================
+# ОБНАЛИЧИВАНИЕ И ОТМЕНА ПОКУПКИ
+# ===========================================================================
+
+class TestRedeemAndCancel:
+    def test_redeem_marks_voucher_and_transfers_registry_units(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 1_000)
+        seed_balance(seller, chars, 1000)
+        voucher, listing = mint_and_list(seller, chars, 100, 900.0)
+        matching_service.buy_listing_direct(buyer.id, listing)
 
-        create_per_unit_listing(seller, chars, total_qty=600, price=7.0)
-        # Осталось 400 — второе на 400 должно пройти
-        listing2 = create_per_unit_listing(seller, chars, total_qty=400, price=8.0)
+        redeemed = voucher_service.redeem_voucher(buyer.id, voucher.id)
+        assert redeemed.status == VoucherStatus.REDEEMED
+        assert redeemed.redeemed_at is not None
 
-        assert listing2 is not None
-        assert listing2.total_quantity == 400
+        buyer_balance = registry_client.get_balance(buyer.registry_account_id, chars)
+        assert sum(b.quantity for b in buyer_balance) == pytest.approx(100)
 
-    def test_deal_constraint_violation_below_min(self):
-        """Попытка купить меньше min_deal_quantity → DealConstraintViolationError."""
-        seller = make_seller()
-        buyer = make_buyer()
+    def test_cannot_redeem_twice(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 1_000)
-        listing = create_per_unit_listing(seller, chars, total_qty=1_000, price=7.0, min_qty=100)
+        seed_balance(seller, chars, 1000)
+        voucher, listing = mint_and_list(seller, chars, 100, 900.0)
+        matching_service.buy_listing_direct(buyer.id, listing)
+        voucher_service.redeem_voucher(buyer.id, voucher.id)
 
-        with pytest.raises(DealConstraintViolationError):
-            voucher_service.issue_simple_voucher(listing, buyer.id, 50.0)  # меньше min=100
+        with pytest.raises(VoucherAlreadyRedeemedError):
+            voucher_service.redeem_voucher(buyer.id, voucher.id)
 
-    def test_deal_constraint_violation_above_max(self):
-        """Попытка купить больше max_deal_quantity → DealConstraintViolationError."""
-        seller = make_seller()
-        buyer = make_buyer()
+    def test_cancel_purchase_reverts_ownership_money_and_reopens_listing(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
         chars = make_characteristics()
-        seed_seller_balance(seller, chars, 1_000)
-        listing = create_per_unit_listing(seller, chars, total_qty=1_000, price=7.0, max_qty=200)
+        seed_balance(seller, chars, 1000)
+        voucher, listing = mint_and_list(seller, chars, 100, 900.0)
 
-        with pytest.raises(DealConstraintViolationError):
-            voucher_service.issue_simple_voucher(listing, buyer.id, 500.0)  # больше max=200
+        seller_cash_before = seller.cash_balance
+        buyer_cash_before = buyer.cash_balance
+        matching_service.buy_listing_direct(buyer.id, listing)
+
+        voucher_service.cancel_purchase(buyer.id, voucher.id)
+
+        refreshed = get_by_number(voucher.number)
+        assert refreshed.current_holder_id == seller.id
+        assert seller.cash_balance == pytest.approx(seller_cash_before)
+        assert buyer.cash_balance == pytest.approx(buyer_cash_before)
+
+        reopened = listing_service.browse_listings()
+        assert any(l.id == listing.id and l.status == "ACTIVE" for l in reopened)
+
+    def test_cannot_cancel_if_you_no_longer_hold_the_voucher(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer1 = make_user("buyer1@test.com", "Держатель 1", legal=False)
+        buyer2 = make_user("buyer2@test.com", "Держатель 2", legal=False)
+        chars = make_characteristics()
+        seed_balance(seller, chars, 1000)
+        voucher, listing1 = mint_and_list(seller, chars, 100, 900.0)
+        matching_service.buy_listing_direct(buyer1.id, listing1)
+
+        listing2 = listing_service.create_listing(buyer1, voucher.id, 1000.0)
+        matching_service.buy_listing_direct(buyer2.id, listing2)
+
+        # buyer1 больше не держит вексель (перепродал buyer2) — отменить свою
+        # старую покупку он больше не может, это прерогатива ТЕКУЩЕГО держателя.
+        with pytest.raises(VoucherNotFoundError):
+            voucher_service.cancel_purchase(buyer1.id, voucher.id)
+
+        # а вот buyer2 (текущий держатель) может откатить именно свою, последнюю покупку
+        reverted = voucher_service.cancel_purchase(buyer2.id, voucher.id)
+        assert reverted.current_holder_id == buyer1.id
+
+    def test_cannot_cancel_after_redeem(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
+        chars = make_characteristics()
+        seed_balance(seller, chars, 1000)
+        voucher, listing = mint_and_list(seller, chars, 100, 900.0)
+        matching_service.buy_listing_direct(buyer.id, listing)
+        voucher_service.redeem_voucher(buyer.id, voucher.id)
+
+        with pytest.raises(TransferNotCancellableError):
+            voucher_service.cancel_purchase(buyer.id, voucher.id)
+
+
+# ===========================================================================
+# ПОДБОР: buy_exact_quantity / invest_amount поверх неделимых предложений
+# ===========================================================================
+
+class TestMatching:
+    def test_buy_exact_quantity_picks_cheapest_vouchers_first(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
+        chars = make_characteristics()
+        seed_balance(seller, chars, 10_000)
+
+        mint_and_list(seller, chars, 500, 4_000.0)   # 8.0 ₽/ед — дороже
+        mint_and_list(seller, chars, 500, 3_000.0)   # 6.0 ₽/ед — дешевле
+
+        result = matching_service.buy_exact_quantity(buyer.id, 500, chars)
+        assert result.total_quantity == 500
+        assert result.total_price == pytest.approx(3_000.0)   # взяли более дешёвый вексель
+
+    def test_buy_exact_quantity_insufficient_supply_raises(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
+        chars = make_characteristics()
+        seed_balance(seller, chars, 100)
+        mint_and_list(seller, chars, 100, 900.0)
+
+        with pytest.raises(InsufficientMarketSupplyError):
+            matching_service.buy_exact_quantity(buyer.id, 10_000, chars)
+
+    def test_invest_amount_respects_budget(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
+        chars = make_characteristics()
+        seed_balance(seller, chars, 10_000)
+
+        mint_and_list(seller, chars, 100, 900.0)
+        mint_and_list(seller, chars, 200, 2_100.0)
+
+        result = matching_service.invest_amount(buyer.id, 1_000.0, chars)
+        assert result.total_price <= 1_000.0
+        assert result.total_quantity == 100  # влезает только первый, более дешёвый вексель
+
+    def test_invest_amount_no_affordable_voucher_raises(self):
+        seller = make_user("seller@test.com", "Продавец")
+        buyer = make_user("buyer@test.com", "Покупатель", legal=False)
+        chars = make_characteristics()
+        seed_balance(seller, chars, 100)
+        mint_and_list(seller, chars, 100, 5_000.0)
+
+        with pytest.raises(InsufficientMarketSupplyError):
+            matching_service.invest_amount(buyer.id, 10.0, chars)

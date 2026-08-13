@@ -7,24 +7,22 @@ import pytest
 
 from app.repositories.listing_repo import listing_repo
 from app.repositories.user_repo import user_repo
-from app.repositories.voucher_repo import simple_voucher_repo, composite_voucher_repo
+from app.repositories.voucher_repo import voucher_repo, voucher_transfer_repo
 from app.services.registry_client import registry_client
+
+
+def _clear_all():
+    listing_repo._data.clear()
+    voucher_repo._data.clear()
+    voucher_transfer_repo._data.clear()
+    user_repo._data.clear()
+    registry_client._batches.clear()
+    registry_client._freezes.clear()
 
 
 @pytest.fixture(autouse=True)
 def reset_stores():
     """Очищает все хранилища до теста и после него."""
-    listing_repo._data.clear()
-    simple_voucher_repo._data.clear()
-    composite_voucher_repo._data.clear()
-    user_repo._data.clear()
-    registry_client._batches.clear()
-    registry_client._freezes.clear()
+    _clear_all()
     yield
-    # После теста тоже чистим — на случай если тест упал
-    listing_repo._data.clear()
-    simple_voucher_repo._data.clear()
-    composite_voucher_repo._data.clear()
-    user_repo._data.clear()
-    registry_client._batches.clear()
-    registry_client._freezes.clear()
+    _clear_all()

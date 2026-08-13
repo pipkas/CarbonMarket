@@ -1,31 +1,45 @@
 """
-Вексель — центральная сущность рынка (см. ТЗ).
+Вексель — центральная сущность рынка.
 
-SimpleVoucher — "элементарный" вексель, результат одной сделки покупателя
-с ОДНИМ продавцом по ОДНОМУ объявлению. При выпуске:
-  - у продавца в реестре замораживается quantity УЕ данных характеристик
-    (registry_client.freeze_units)
-  - Listing.remaining_quantity уменьшается на quantity
-  - вексель получает статус ISSUED (покупатель владеет правом требования,
-    но реальные УЕ на его баланс в реестре ещё не зачислены)
+ВАЖНО (смена модели): вексель больше не выпускается автоматически "внутри"
+сделки покупки. Теперь это самостоятельный пронумерованный инструмент:
 
-CompositeVoucher — "сборный" вексель для удобства восприятия покупателя
-(ТЗ: "формирует один вексель, в котором могут быть несколько векселей от
-разных продавцов"). Это агрегатор над несколькими SimpleVoucher,
-выпущенными в рамках одной покупки (сценарий 1 или 2).
+  1) Продавец, у которого есть УЕ на счету в реестре, ВЫПУСКАЕТ
+     (минтит) вексель на конкретный объём и характеристики —
+     voucher_service.mint_voucher. В этот момент:
+       - в реестре замораживается quantity УЕ (registry_client.freeze_units)
+       - создаётся Voucher(status=ACTIVE) с уникальным номером (number)
+       - продавец становится и original_seller_id, и current_holder_id
+       - в журнал переходов (VoucherTransfer) добавляется запись типа MINT
 
-Обналичивание (redeem): когда покупателю нужно ИМЕННО зачисление УЕ на
-баланс (а не просто владение векселем), по каждому SimpleVoucher вызывается
-registry_client.transfer_units(seller_account -> buyer_account), вексель
-переходит в статус REDEEMED. До этого момента вексель можно (в будущем
-расширении) перепродать другому покупателю — модель это допускает, т.к.
-buyer_id — обычное изменяемое поле, но сама торговля векселями на вторичном
-рынке в этом MVP не реализована (см. docs/architecture.md, "Точки расширения").
+  2) Только СУЩЕСТВУЮЩИЙ вексель можно выставить на продажу — Listing
+     теперь ссылается на voucher_id и содержит единственную ФИКСИРОВАННУЮ
+     цену за вексель целиком (fixed_price). Продавать "углеродные единицы
+     по цене за единицу" больше нельзя — see app/models/listing.py.
+
+  3) Когда вексель покупают, current_holder_id меняется на покупателя,
+     в VoucherTransfer добавляется запись типа SALE (с ценой и ссылкой на
+     Listing). Новый держатель может: обналичить (redeem) ИЛИ выставить
+     тот же вексель на перепродажу за свою цену — вексель продолжает жить
+     как один и тот же пронумерованный инструмент, просто со сменившимся
+     держателем. Так образуется цепочка перепродаж.
+
+  4) По номеру векселя (Voucher.number) можно поднять всю цепочку
+     VoucherTransfer и увидеть: кто выпустил вексель изначально
+     (original_seller_id), кто были промежуточные держатели, кто владеет
+     им сейчас (current_holder_id) — см. voucher_repo.get_transfer_chain
+     и GET /vouchers/number/{number}.
+
+Обналичивание (redeem): когда ТЕКУЩЕМУ держателю нужны именно УЕ на
+балансе в реестре (а не просто владение векселем), вызывается
+registry_client.transfer_units(original_seller_account -> holder_account)
+по сохранённому registry_freeze_ref — вексель переходит в REDEEMED и
+больше не может ни перепродаваться, ни обналичиваться повторно.
 """
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
@@ -33,60 +47,73 @@ from app.models.carbon_unit import CarbonUnitCharacteristics
 
 
 class VoucherStatus(str, Enum):
-    ISSUED = "ISSUED"        # выпущен, УЕ заморожены у продавца
-    REDEEMED = "REDEEMED"    # обналичен, УЕ реально зачислены покупателю
-    CANCELLED = "CANCELLED"
+    ACTIVE = "ACTIVE"        # существует, можно держать/перепродавать/обналичить
+    REDEEMED = "REDEEMED"    # обналичен, УЕ реально зачислены текущему держателю
+
+
+class TransferType(str, Enum):
+    MINT = "MINT"                  # первичный выпуск продавцом из реестра — не покупка
+    SALE = "SALE"                  # переход по купленному объявлению (fixed_price)
+    CANCELLATION = "CANCELLATION"  # откат последней покупки — возврат предыдущему держателю
 
 
 @dataclass
-class SimpleVoucher:
+class Voucher:
     id: str
-    listing_id: str
-    seller_id: str
-    buyer_id: str
+    number: str                        # человекочитаемый уникальный номер, напр. "CM-000042"
+    original_seller_id: str            # кто выпустил вексель из реестра изначально
+    current_holder_id: str             # кто владеет векселем сейчас
     characteristics: CarbonUnitCharacteristics
-    quantity: float
-    price_per_unit: float          # зафиксированная цена сделки (эффективная)
-    total_price: float
-    status: VoucherStatus = VoucherStatus.ISSUED
-    registry_freeze_ref: str | None = None   # ссылка на операцию заморозки в реестре
-    created_at: datetime = None    # type: ignore
+    quantity: float                    # объём УЕ — фиксирован на весь срок жизни векселя (неделим)
+    status: VoucherStatus = VoucherStatus.ACTIVE
+    registry_freeze_ref: str | None = None   # ссылка на заморозку в реестре (со времён минта)
+    created_at: datetime = None        # type: ignore   # момент выпуска (минта)
     redeemed_at: datetime | None = None
 
     @staticmethod
-    def new(listing_id, seller_id, buyer_id, characteristics, quantity, price_per_unit, freeze_ref) -> "SimpleVoucher":
-        return SimpleVoucher(
+    def new(original_seller_id: str, characteristics: CarbonUnitCharacteristics, quantity: float,
+            number: str, freeze_ref: str | None) -> "Voucher":
+        return Voucher(
             id=str(uuid.uuid4()),
-            listing_id=listing_id,
-            seller_id=seller_id,
-            buyer_id=buyer_id,
+            number=number,
+            original_seller_id=original_seller_id,
+            current_holder_id=original_seller_id,
             characteristics=characteristics,
             quantity=quantity,
-            price_per_unit=price_per_unit,
-            total_price=round(quantity * price_per_unit, 2),
             registry_freeze_ref=freeze_ref,
             created_at=datetime.utcnow(),
         )
 
 
 @dataclass
-class CompositeVoucher:
+class VoucherTransfer:
+    """
+    Одна запись неизменяемого журнала владения векселем. Записи никогда не
+    удаляются и не редактируются (даже при отмене покупки — см.
+    TransferType.CANCELLATION) — так по номеру векселя всегда можно
+    восстановить полную историю: кто выпустил, у кого он был, кто владеет
+    сейчас.
+    """
     id: str
-    buyer_id: str
-    component_voucher_ids: list[str] = field(default_factory=list)
-    total_quantity: float = 0.0
-    total_price: float = 0.0
-    scenario: str = ""   # "BUY_EXACT_QUANTITY" | "INVEST_AMOUNT" | "CHOOSE_SELLER"
-    created_at: datetime = None  # type: ignore
+    voucher_id: str
+    type: TransferType
+    from_user_id: str | None    # None только для MINT (у векселя ещё не было предыдущего держателя)
+    to_user_id: str
+    price: float | None         # уплаченная сумма за ВЕСЬ вексель; None для MINT/CANCELLATION
+    listing_id: str | None      # объявление, по которому прошла сделка; None для MINT/CANCELLATION
+    transferred_at: datetime = None  # type: ignore
 
     @staticmethod
-    def new(buyer_id: str, component_voucher_ids: list[str], total_quantity: float, total_price: float, scenario: str) -> "CompositeVoucher":
-        return CompositeVoucher(
+    def new(voucher_id: str, type_: TransferType, to_user_id: str,
+            from_user_id: str | None = None, price: float | None = None,
+            listing_id: str | None = None) -> "VoucherTransfer":
+        return VoucherTransfer(
             id=str(uuid.uuid4()),
-            buyer_id=buyer_id,
-            component_voucher_ids=component_voucher_ids,
-            total_quantity=total_quantity,
-            total_price=total_price,
-            scenario=scenario,
-            created_at=datetime.utcnow(),
+            voucher_id=voucher_id,
+            type=type_,
+            from_user_id=from_user_id,
+            to_user_id=to_user_id,
+            price=price,
+            listing_id=listing_id,
+            transferred_at=datetime.utcnow(),
         )

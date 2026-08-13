@@ -365,7 +365,64 @@ input, select { font-family: var(--font-body); }
 .hc-comp-qty { font-family: var(--font-mono); font-size: 12.5px; }
 .hc-comp-price { font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); }
 
-/* ---------------- RESPONSIVE ---------------- */
+/* ---------------- ССЫЛКА-КНОПКА ВНУТРИ ТЕКСТА (переход к проверке векселя) ---------------- */
+.link-inline {
+  font: inherit; color: var(--forest); font-weight: 600;
+  text-decoration: underline; text-underline-offset: 2px; padding: 0;
+}
+.link-inline:hover { color: var(--forest-deep); }
+
+/* ---------------- НОМЕР ВЕКСЕЛЯ (кликабельный, ведёт к проверке) ---------------- */
+.voucher-number-btn {
+  font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
+  color: var(--bronze); background: var(--bronze-tint);
+  padding: 3px 8px; border-radius: 3px; letter-spacing: .02em;
+}
+.voucher-number-btn:hover { background: var(--bronze); color: #fff; }
+
+/* ---------------- ПРОВЕРКА ВЕКСЕЛЯ (форма + результат) ---------------- */
+.verify-form { display: flex; gap: 12px; align-items: flex-end; max-width: 480px; margin-bottom: 28px; }
+.verify-form .field { flex: 1; }
+
+.voucher-passport { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 24px; box-shadow: var(--shadow-card); margin-bottom: 22px; }
+.vp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
+.vp-number { font-family: var(--font-mono); font-size: 22px; font-weight: 600; color: var(--forest-deep); }
+.vp-project { font-size: 14px; color: var(--ink-soft); margin-top: 2px; }
+
+.vp-chain { margin-top: 22px; }
+.vp-chain-title { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); font-weight: 600; margin-bottom: 14px; }
+.vp-timeline { display: flex; flex-direction: column; }
+.vp-step { display: flex; gap: 14px; position: relative; padding-bottom: 20px; }
+.vp-step:last-child { padding-bottom: 0; }
+.vp-step-rail { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; }
+.vp-step-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--forest); margin-top: 4px; flex-shrink: 0; }
+.vp-step-dot--cancel { background: var(--brick); }
+.vp-step-line { flex: 1; width: 1px; background: var(--line-strong); margin-top: 4px; min-height: 22px; }
+.vp-step-body { flex: 1; padding-bottom: 2px; }
+.vp-step-label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.vp-step-meta { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+.vp-step-price { font-family: var(--font-mono); font-size: 12.5px; color: var(--forest-deep); font-weight: 600; margin-top: 2px; }
+
+/* ---------------- МОИ ОБЪЯВЛЕНИЯ: список векселей без активного лота ---------------- */
+.unlisted-vouchers { display: flex; flex-direction: column; gap: 10px; }
+.uv-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 14px;
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--paper); flex-wrap: wrap;
+}
+.uv-left { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.uv-project { font-weight: 600; font-size: 13.5px; color: var(--forest-deep); }
+.uv-meta { font-size: 12px; color: var(--ink-soft); }
+.uv-foot { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.uv-foot input[type=number] { width: 110px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 13px; }
+
+/* ---------------- КАРТОЧКА ВЕКСЕЛЯ (Мои векселя) ---------------- */
+.voucher-card-foot { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+.voucher-card-foot .btn { width: 100%; }
+.voucher-list-row { display: flex; gap: 8px; align-items: center; }
+.voucher-list-row input[type=number] { flex: 1; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 13px; }
+
+
 @media (max-width: 880px) {
   .topbar-inner { padding: 0 16px; gap: 14px; }
   .brand-text { display: none; }
@@ -373,4 +430,6 @@ input, select { font-family: var(--font-body); }
   .page { padding: 24px 16px 60px; }
   .grid-2, .field-row, .filters-grid { grid-template-columns: 1fr; }
   h1 { font-size: 26px; }
+  .verify-form { flex-direction: column; align-items: stretch; }
+  .uv-row { flex-direction: column; align-items: stretch; }
 }

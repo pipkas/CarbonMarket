@@ -1,67 +1,55 @@
 """
-ЯДРО РЫНКА. Три пути покупки:
+ЯДРО РЫНКА — ПОСЛЕ смены модели.
 
-  1) buy_exact_quantity — покупатель точно знает, сколько УЕ ему нужно
-     (опционально — с фильтром характеристик, например "именно от проекта X").
-     Система сама собирает самую дешёвую комбинацию предложений.
+Раньше объявления продавали "сырые" углеродные единицы, которые можно
+было брать частями (сколько нужно). ТЕПЕРЬ каждое объявление — это ровно
+ОДИН конкретный, уже выпущенный вексель (Voucher) с фиксированной ценой
+за весь его объём целиком. Вексель НЕДЕЛИМ: либо берём его весь, либо не
+берём вовсе. Это меняет сам алгоритм подбора — раньше можно было "отрезать"
+от объявления ровно нужный остаток, теперь подбор — это выбор ЦЕЛЫХ
+предложений (векселей), которые в сумме лучше всего закрывают запрос
+(похоже на задачу о рюкзаке).
 
-  2) invest_amount — покупатель вводит сумму денег, а не количество УЕ.
-     Система максимизирует объём УЕ, который можно купить на эту сумму
-     (опять же — самые дешёвые предложения в первую очередь).
+  1) buy_exact_quantity — покупатель называет нужный объём. Берём самые
+     дешёвые (₽ за единицу) подходящие векселя один за другим, пока
+     суммарный объём не достигнет требуемого. Поскольку векселя неделимы,
+     точное совпадение не гарантировано — либо остаётся unmet_quantity
+     (не набралось), либо последний вексель может "перекрыть" запрос
+     (total_quantity выйдет чуть больше quantity_needed) — покупатель
+     видит это в превью ДО оплаты и решает сам.
 
-  3) reserve_from_listing — покупатель уже сам посмотрел витрину
-     (listing_service.browse_listings) и выбрал конкретное объявление и
-     объём — здесь просто оформляем сделку по этому объявлению напрямую,
-     без алгоритма подбора.
+  2) invest_amount — покупатель называет бюджет. Идём по тем же
+     отсортированным по цене векселям и берём целиком каждый, который
+     укладывается в остаток бюджета (не обязательно подряд — если
+     очередной вексель не влезает, пробуем следующий, вдруг он дешевле
+     по общей цене).
 
-Расчёт для (1) и (2) вынесен в чистую функцию `_allocate` — она НЕ
-выпускает векселя и ничего не мутирует, только считает, из каких
-предложений и по какой цене можно собрать нужный объём/бюджет. Это
-позволяет отдельно:
-  - `preview_*` — показать покупателю ДО оплаты, из чего сложится
-    покупка (топ предложений, цена, продавцы), не резервируя ничего;
-  - `buy_exact_quantity` / `invest_amount` — выполнить ту же самую
-    раскладку и уже реально выпустить векселя (заморозить УЕ в реестре).
+  3) buy_listing_direct — покупатель уже сам выбрал конкретное
+     объявление (конкретный вексель) на витрине — просто покупаем его.
 
-ГЛАВНЫЙ АЛГОРИТМ (жадный, greedy):
-  a) Взять активные объявления, подходящие под фильтр характеристик.
-  b) Отсортировать по effective_price_per_unit(remaining_quantity) —
-     то есть по цене "если бы брали весь остаток" (первое приближение;
-     цена пересчитывается под реальный взятый объём на каждом шаге,
-     т.к. для FLAT_FEE_PER_DEAL цена за единицу зависит от объёма сделки).
-  c) Идти от самых дешёвых к самым дорогим и "откусывать" от каждого
-     объявления столько, сколько можно:
-       - не больше remaining_quantity этого объявления
-       - не больше max_deal_quantity (если задан)
-       - не меньше min_deal_quantity (если задан) — если оставшаяся
-         потребность меньше минимума объявления, либо добираем до
-         минимума (если это укладывается в остаток), либо пропускаем
-         объявление для этого запроса.
-       - всегда целое число УЕ (floor)
-  d) Останавливаемся, когда потребность закрыта (количество или бюджет).
-
-  ОГОВОРКА (честно фиксируем ограничение MVP): это быстрая эвристика, а
-  не гарантированно оптимальное решение задачи о рюкзаке, которая здесь
-  возникает из-за min/max_deal_quantity. Точку расширения — замену на
-  ILP/DP-солвер — можно внести в `_allocate`, не трогая остальной код.
+ОГОВОРКА (честно фиксируем ограничение MVP): жадная эвристика, а не
+гарантированно оптимальное решение задачи о рюкзаке. Точка расширения —
+заменить `_allocate` на ILP/DP-солвер, не трогая остальной код.
 """
-import math
 from dataclasses import dataclass, field
 
 from app.core.exceptions import InsufficientMarketSupplyError
+from app.models.activity import ActivityType
 from app.models.carbon_unit import CarbonUnitCharacteristics
 from app.models.listing import Listing
-from app.models.voucher import CompositeVoucher
+from app.models.voucher import Voucher
+from app.repositories import activity_repo
 from app.repositories.listing_repo import get_active
+from app.repositories.voucher_repo import voucher_repo
 from app.services import voucher_service
 
 
 @dataclass
 class AllocationItem:
     listing: Listing
-    quantity: float
-    price_per_unit: float
-    subtotal: float
+    voucher: Voucher
+    price: float          # = listing.fixed_price (вся цена за вексель целиком)
+    price_per_unit: float  # только для отображения/сортировки, не для оплаты
 
 
 @dataclass
@@ -73,16 +61,26 @@ class AllocationResult:
     leftover_budget: float = 0.0    # только для режима "бюджет"
 
 
-def _candidate_listings(characteristics_filter: CarbonUnitCharacteristics | None) -> list[Listing]:
+@dataclass
+class PurchaseResult:
+    vouchers: list[Voucher]
+    total_quantity: float
+    total_price: float
+    scenario: str
+
+
+def _candidate_pairs(characteristics_filter: CarbonUnitCharacteristics | None) -> list[tuple[Listing, Voucher]]:
     listings = get_active()
+    pairs = [(l, voucher_repo.get(l.voucher_id)) for l in listings]
+    pairs = [(l, v) for l, v in pairs if v is not None]
     if characteristics_filter:
-        listings = [l for l in listings if l.characteristics.matches(characteristics_filter)]
-    listings.sort(key=lambda l: l.effective_price_per_unit(l.remaining_quantity))
-    return listings
+        pairs = [(l, v) for l, v in pairs if v.characteristics.matches(characteristics_filter)]
+    pairs.sort(key=lambda pair: pair[0].fixed_price / pair[1].quantity)
+    return pairs
 
 
 def _allocate(
-    candidates: list[Listing],
+    candidates: list[tuple[Listing, Voucher]],
     quantity_target: float | None = None,
     budget_target: float | None = None,
 ) -> AllocationResult:
@@ -92,94 +90,104 @@ def _allocate(
 
     if quantity_target is not None:
         remaining_needed = quantity_target
-        for listing in candidates:
+        for listing, voucher in candidates:
             if remaining_needed <= 1e-9:
                 break
-            upper_bound = listing.remaining_quantity
-            if listing.max_deal_quantity:
-                upper_bound = min(upper_bound, listing.max_deal_quantity)
-            take = math.floor(min(upper_bound, remaining_needed))
-            if listing.min_deal_quantity and take < listing.min_deal_quantity:
-                if listing.min_deal_quantity <= upper_bound:
-                    take = listing.min_deal_quantity
-                else:
-                    continue
-            if take <= 1e-9:
-                continue
-            price = listing.effective_price_per_unit(take)
-            result.items.append(AllocationItem(listing, take, price, round(take * price, 2)))
-            remaining_needed -= take
+            price_per_unit = listing.fixed_price / voucher.quantity
+            result.items.append(AllocationItem(listing, voucher, listing.fixed_price, price_per_unit))
+            remaining_needed -= voucher.quantity
         result.unmet_quantity = max(0.0, remaining_needed)
 
     else:
         remaining_budget = budget_target
-        for listing in candidates:
+        for listing, voucher in candidates:
             if remaining_budget <= 1e-9:
                 break
-            upper_bound_qty = listing.remaining_quantity
-            if listing.max_deal_quantity:
-                upper_bound_qty = min(upper_bound_qty, listing.max_deal_quantity)
-            price_per_unit = listing.effective_price_per_unit(upper_bound_qty)
-            affordable_qty = remaining_budget / price_per_unit
-            take = math.floor(min(upper_bound_qty, affordable_qty))
-            if listing.min_deal_quantity and take < listing.min_deal_quantity:
-                continue
-            if take <= 1e-9:
-                continue
-            subtotal = round(take * price_per_unit, 2)
-            result.items.append(AllocationItem(listing, take, price_per_unit, subtotal))
-            remaining_budget -= subtotal
+            if listing.fixed_price > remaining_budget + 1e-9:
+                continue  # этот вексель не влезает в остаток бюджета — пробуем следующий
+            price_per_unit = listing.fixed_price / voucher.quantity
+            result.items.append(AllocationItem(listing, voucher, listing.fixed_price, price_per_unit))
+            remaining_budget -= listing.fixed_price
         result.leftover_budget = max(0.0, remaining_budget)
 
-    result.total_quantity = sum(i.quantity for i in result.items)
-    result.total_price = sum(i.subtotal for i in result.items)
+    result.total_quantity = sum(i.voucher.quantity for i in result.items)
+    result.total_price = sum(i.price for i in result.items)
     return result
 
 
 # ---------------------------------------------------------------------------
 # ПРЕВЬЮ — только расчёт, ничего не резервирует и не требует авторизации
-# (используется, чтобы показать покупателю топ предложений ДО оформления).
 # ---------------------------------------------------------------------------
 
 def preview_buy_exact_quantity(quantity_needed: float, characteristics_filter: CarbonUnitCharacteristics | None = None) -> AllocationResult:
-    return _allocate(_candidate_listings(characteristics_filter), quantity_target=quantity_needed)
+    return _allocate(_candidate_pairs(characteristics_filter), quantity_target=quantity_needed)
 
 
 def preview_invest_amount(budget_amount: float, characteristics_filter: CarbonUnitCharacteristics | None = None) -> AllocationResult:
-    return _allocate(_candidate_listings(characteristics_filter), budget_target=budget_amount)
+    return _allocate(_candidate_pairs(characteristics_filter), budget_target=budget_amount)
 
 
 # ---------------------------------------------------------------------------
-# ИСПОЛНЕНИЕ — реально выпускает векселя (требует авторизованного покупателя)
+# ИСПОЛНЕНИЕ — реально покупает векселя (требует авторизованного покупателя)
 # ---------------------------------------------------------------------------
 
-def buy_exact_quantity(buyer_id: str, quantity_needed: float, characteristics_filter: CarbonUnitCharacteristics | None = None) -> CompositeVoucher:
-    allocation = _allocate(_candidate_listings(characteristics_filter), quantity_target=quantity_needed)
+def _execute(buyer_id: str, allocation: AllocationResult, scenario: str) -> PurchaseResult:
+    purchased = [voucher_service.buy_listing(buyer_id, item.listing) for item in allocation.items]
+
+    if purchased:
+        only = purchased[0] if len(purchased) == 1 else None
+        counterparty_name = None
+        project_name = None
+        if only:
+            from app.repositories.user_repo import user_repo
+            project_name = only.characteristics.project_name
+            seller = user_repo.get(allocation.items[0].listing.seller_id)
+            counterparty_name = seller.display_name if seller else None
+
+        activity_repo.log(
+            buyer_id, ActivityType.PURCHASE,
+            quantity=allocation.total_quantity, amount=allocation.total_price,
+            project_name=project_name, counterparty_name=counterparty_name,
+            related_id=purchased[0].id,
+        )
+
+    return PurchaseResult(
+        vouchers=purchased,
+        total_quantity=allocation.total_quantity,
+        total_price=allocation.total_price,
+        scenario=scenario,
+    )
+
+
+def buy_exact_quantity(buyer_id: str, quantity_needed: float, characteristics_filter: CarbonUnitCharacteristics | None = None) -> PurchaseResult:
+    allocation = _allocate(_candidate_pairs(characteristics_filter), quantity_target=quantity_needed)
 
     if allocation.unmet_quantity > 1e-6:
         raise InsufficientMarketSupplyError(requested=quantity_needed, best_available=allocation.total_quantity)
 
-    issued_vouchers = [
-        voucher_service.issue_simple_voucher(item.listing, buyer_id, item.quantity)
-        for item in allocation.items
-    ]
-    return voucher_service.build_composite_voucher(buyer_id, issued_vouchers, scenario="BUY_EXACT_QUANTITY")
+    return _execute(buyer_id, allocation, scenario="BUY_EXACT_QUANTITY")
 
 
-def invest_amount(buyer_id: str, budget_amount: float, characteristics_filter: CarbonUnitCharacteristics | None = None) -> CompositeVoucher:
-    allocation = _allocate(_candidate_listings(characteristics_filter), budget_target=budget_amount)
+def invest_amount(buyer_id: str, budget_amount: float, characteristics_filter: CarbonUnitCharacteristics | None = None) -> PurchaseResult:
+    allocation = _allocate(_candidate_pairs(characteristics_filter), budget_target=budget_amount)
 
     if not allocation.items:
         raise InsufficientMarketSupplyError(requested=budget_amount, best_available=0)
 
-    issued_vouchers = [
-        voucher_service.issue_simple_voucher(item.listing, buyer_id, item.quantity)
-        for item in allocation.items
-    ]
-    return voucher_service.build_composite_voucher(buyer_id, issued_vouchers, scenario="INVEST_AMOUNT")
+    return _execute(buyer_id, allocation, scenario="INVEST_AMOUNT")
 
 
-def reserve_from_listing(buyer_id: str, listing: Listing, quantity: float) -> CompositeVoucher:
-    voucher = voucher_service.issue_simple_voucher(listing, buyer_id, quantity)
-    return voucher_service.build_composite_voucher(buyer_id, [voucher], scenario="CHOOSE_SELLER")
+def buy_listing_direct(buyer_id: str, listing: Listing) -> Voucher:
+    from app.repositories.user_repo import user_repo
 
+    seller = user_repo.get(listing.seller_id)
+    voucher = voucher_service.buy_listing(buyer_id, listing)
+
+    activity_repo.log(
+        buyer_id, ActivityType.PURCHASE,
+        quantity=voucher.quantity, amount=listing.fixed_price,
+        project_name=voucher.characteristics.project_name,
+        counterparty_name=seller.display_name if seller else None,
+        related_id=voucher.id,
+    )
+    return voucher

@@ -30,19 +30,36 @@ class VoucherNotFoundError(DomainError):
 
 class InsufficientSellerCapacityError(DomainError):
     """
-    Продавец пытается выставить на продажу больше УЕ, чем у него реально
-    доступно (баланс в реестре минус уже замороженное под другие векселя
-    минус уже выставленное в других активных объявлениях).
+    Продавец пытается заминтить (выпустить) вексель на больший объём УЕ,
+    чем у него реально доступно на счету в реестре по этим характеристикам.
     """
     http_status = 422
 
 
-class DealConstraintViolationError(DomainError):
+class VoucherNotOwnedError(DomainError):
     """
-    Нарушение гибких правил объявления: запрошенное количество меньше
-    min_deal_quantity или больше max_deal_quantity данного объявления.
+    Действие с векселем (выставить на продажу, обналичить, отменить
+    покупку) может совершать только его ТЕКУЩИЙ держатель.
     """
-    http_status = 422
+    http_status = 403
+
+
+class VoucherAlreadyRedeemedError(DomainError):
+    """Вексель уже обналичен — с ним больше нельзя ничего сделать (перепродать, обналичить повторно)."""
+    http_status = 409
+
+
+class VoucherAlreadyListedError(DomainError):
+    """У этого векселя уже есть активное объявление о продаже — второе выставить нельзя."""
+    http_status = 409
+
+
+class TransferNotCancellableError(DomainError):
+    """
+    Отменить можно только САМУЮ ПОСЛЕДНЮЮ покупку данного векселя — и
+    только пока его не перепродали дальше и не обналичили.
+    """
+    http_status = 409
 
 
 class InsufficientFundsError(DomainError):
@@ -59,15 +76,6 @@ class InsufficientFundsError(DomainError):
         super().__init__(
             f"Недостаточно средств: требуется {required:.2f} ₽, доступно {available:.2f} ₽"
         )
-
-
-class VoucherNotCancellableError(DomainError):
-    """
-    Вексель нельзя отменить: хотя бы один из его компонентов уже обналичен
-    (УЕ реально зачислены на баланс покупателя в реестре) — откатывать
-    такую операцию небезопасно, либо вексель уже был отменён ранее.
-    """
-    http_status = 409
 
 
 class InsufficientMarketSupplyError(DomainError):

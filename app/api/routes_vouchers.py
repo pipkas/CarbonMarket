@@ -1,82 +1,132 @@
-"""Просмотр и обналичивание векселей покупателя."""
-from fastapi import APIRouter, Depends
+"""
+Выпуск, просмотр и жизненный цикл векселей.
+
+GET /vouchers/number/{number} — ПУБЛИЧНЫЙ (без авторизации) поиск по
+номеру векселя: кто продавец (original_seller), кто текущий держатель,
+и вся цепочка промежуточных владельцев — см. voucher_service.get_ownership_chain.
+Это соответствует идее "реестра": номер векселя можно проверить как
+любой другой публичный регистрационный номер.
+"""
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.dependencies import get_current_user
+from app.models.carbon_unit import CarbonUnitCharacteristics
 from app.models.user import User
+from app.models.voucher import Voucher, VoucherTransfer
+from app.repositories.listing_repo import get_active_listing_for_voucher
 from app.repositories.user_repo import user_repo
-from app.repositories.voucher_repo import get_composites_for_buyer, get_composite_with_components
-from app.schemas.market import CompositeVoucherResponse, CompositeVoucherDetailResponse, SimpleVoucherDTO
-from app.services import voucher_service
+from app.repositories.voucher_repo import get_by_number, get_held_by, voucher_repo
+from app.schemas.carbon_unit import CharacteristicsFilterDTO
+from app.schemas.voucher import (
+    MintVoucherRequest,
+    VoucherHistoryResponse,
+    VoucherListingInfo,
+    VoucherResponse,
+    VoucherTransferDTO,
+)
+from app.services import seller_capacity_service, voucher_service
 
 router = APIRouter(prefix="/vouchers", tags=["vouchers"])
 
 
-def _build_detail(composite, components) -> CompositeVoucherDetailResponse:
-    """Собирает детальный ответ: добавляет имена продавцов и статусы."""
-    dtos = []
-    for v in components:
-        seller = user_repo.get(v.seller_id)
-        dtos.append(SimpleVoucherDTO(
-            id=v.id,
-            seller_id=v.seller_id,
-            seller_display_name=seller.display_name if seller else "—",
-            listing_id=v.listing_id,
-            project_name=v.characteristics.project_name if v.characteristics else None,
-            quantity=v.quantity,
-            price_per_unit=v.price_per_unit,
-            total_price=v.total_price,
-            status=v.status.value,
-            created_at=v.created_at,
-            redeemed_at=v.redeemed_at,
-        ))
+def _display_name(user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    user = user_repo.get(user_id)
+    return user.display_name if user else "—"
 
-    statuses = {d.status for d in dtos}
-    if statuses == {"REDEEMED"}:
-        overall = "REDEEMED"
-    elif statuses == {"CANCELLED"}:
-        overall = "CANCELLED"
-    elif "REDEEMED" in statuses:
-        overall = "PARTIAL"
-    else:
-        overall = "ISSUED"
 
-    return CompositeVoucherDetailResponse(
-        id=composite.id,
-        buyer_id=composite.buyer_id,
-        total_quantity=composite.total_quantity,
-        total_price=composite.total_price,
-        scenario=composite.scenario,
-        created_at=composite.created_at,
-        components=dtos,
-        status=overall,
+def _to_response(voucher: Voucher) -> VoucherResponse:
+    chain = voucher_service.get_ownership_chain(voucher.id)
+    sale_transfers = [t for t in chain if t.type.value in ("SALE",)]
+    latest_sale = sale_transfers[-1] if sale_transfers else None
+    # "Сколько раз перепродавался" — считаем чистые смены держателя, без
+    # учёта отменённых покупок (у каждой SALE есть максимум одна
+    # компенсирующая её CANCELLATION где-то позже в цепочке).
+    cancellations = len([t for t in chain if t.type.value == "CANCELLATION"])
+    owners_count = max(0, len(sale_transfers) - cancellations)
+
+    active_listing = get_active_listing_for_voucher(voucher.id)
+
+    return VoucherResponse(
+        id=voucher.id,
+        number=voucher.number,
+        characteristics=CharacteristicsFilterDTO(**voucher.characteristics.__dict__),
+        quantity=voucher.quantity,
+        status=voucher.status.value,
+        original_seller_id=voucher.original_seller_id,
+        original_seller_display_name=_display_name(voucher.original_seller_id) or "—",
+        current_holder_id=voucher.current_holder_id,
+        current_holder_display_name=_display_name(voucher.current_holder_id) or "—",
+        is_original_seller=voucher.current_holder_id == voucher.original_seller_id,
+        price_paid=latest_sale.price if (latest_sale and owners_count > 0) else None,
+        owners_count=owners_count,
+        active_listing=VoucherListingInfo(listing_id=active_listing.id, fixed_price=active_listing.fixed_price) if active_listing else None,
+        created_at=voucher.created_at,
+        redeemed_at=voucher.redeemed_at,
     )
 
 
-@router.get("/mine", response_model=list[CompositeVoucherDetailResponse])
+def _transfer_to_dto(transfer: VoucherTransfer) -> VoucherTransferDTO:
+    return VoucherTransferDTO(
+        type=transfer.type.value,
+        from_user_id=transfer.from_user_id,
+        from_display_name=_display_name(transfer.from_user_id),
+        to_user_id=transfer.to_user_id,
+        to_display_name=_display_name(transfer.to_user_id) or "—",
+        price=transfer.price,
+        transferred_at=transfer.transferred_at,
+    )
+
+
+@router.get("/mint/available-capacity")
+def available_to_mint(characteristics: CharacteristicsFilterDTO = Depends(), user: User = Depends(get_current_user)):
+    """Сколько УЕ данных характеристик пользователь реально может заминтить в новый вексель прямо сейчас."""
+    chars = CarbonUnitCharacteristics(**characteristics.model_dump())
+    qty = seller_capacity_service.get_available_to_mint(user.registry_account_id, chars)
+    return {"available_quantity": qty}
+
+
+@router.post("/mint", response_model=VoucherResponse)
+def mint(payload: MintVoucherRequest, user: User = Depends(get_current_user)):
+    """Выпустить новый вексель из своих УЕ в реестре — до этого его нельзя выставить на продажу."""
+    chars = CarbonUnitCharacteristics(**payload.characteristics.model_dump())
+    voucher = voucher_service.mint_voucher(user, chars, payload.quantity)
+    return _to_response(voucher)
+
+
+@router.get("/mine", response_model=list[VoucherResponse])
 def my_vouchers(user: User = Depends(get_current_user)):
-    """Все векселя покупателя с детализацией по компонентам."""
-    composites = get_composites_for_buyer(user.id)
-    result = []
-    for composite in composites:
-        _, components = get_composite_with_components(composite.id)
-        result.append(_build_detail(composite, components))
-    return result
+    """Все векселя, которые пользователь держит прямо сейчас — выпущенные им самим и купленные."""
+    return [_to_response(v) for v in get_held_by(user.id)]
 
 
-@router.post("/{composite_id}/redeem", response_model=CompositeVoucherResponse)
-def redeem(composite_id: str, user: User = Depends(get_current_user)):
+@router.get("/number/{number}", response_model=VoucherHistoryResponse)
+def lookup_by_number(number: str):
     """
-    Обналичивание: покупателю нужны реальные УЕ на балансе в реестре,
-    а не просто владение векселем (см. voucher_service.redeem_composite_voucher).
+    Публичный поиск по номеру векселя — доступен без авторизации, как
+    проверка любого регистрационного номера. Показывает продавца-эмитента,
+    всех промежуточных держателей и текущего владельца.
     """
-    return voucher_service.redeem_composite_voucher(user.id, composite_id)
+    voucher = get_by_number(number)
+    if not voucher:
+        raise HTTPException(status_code=404, detail=f"Вексель с номером {number} не найден")
+    chain = voucher_service.get_ownership_chain(voucher.id)
+    return VoucherHistoryResponse(
+        voucher=_to_response(voucher),
+        chain=[_transfer_to_dto(t) for t in chain],
+    )
 
 
-@router.post("/{composite_id}/cancel", response_model=CompositeVoucherResponse)
-def cancel(composite_id: str, user: User = Depends(get_current_user)):
-    """
-    Отмена векселя ДО обналичивания — снимает заморозку УЕ у продавца в
-    реестре и возвращает объём обратно в остаток объявления (см.
-    voucher_service.cancel_composite_voucher).
-    """
-    return voucher_service.cancel_composite_voucher(user.id, composite_id)
+@router.post("/{voucher_id}/redeem", response_model=VoucherResponse)
+def redeem(voucher_id: str, user: User = Depends(get_current_user)):
+    """Обналичивание: текущему держателю нужны реальные УЕ на балансе в реестре."""
+    voucher = voucher_service.redeem_voucher(user.id, voucher_id)
+    return _to_response(voucher)
+
+
+@router.post("/{voucher_id}/cancel-purchase", response_model=VoucherResponse)
+def cancel_purchase(voucher_id: str, user: User = Depends(get_current_user)):
+    """Отменить свою последнюю покупку этого векселя — вернуть его прежнему держателю и получить деньги обратно."""
+    voucher = voucher_service.cancel_purchase(user.id, voucher_id)
+    return _to_response(voucher)

@@ -27,6 +27,7 @@
 
     <nav class="topnav">
       <button class="topnav-item is-active" data-view="market">Витрина</button>
+      <button class="topnav-item" data-view="verify">Проверить вексель</button>
       <button class="topnav-item" data-view="listings">Мои объявления</button>
       <button class="topnav-item" data-view="vouchers">Мои векселя</button>
       <button class="topnav-item" data-view="history">История</button>
@@ -60,8 +61,8 @@
 
     <div class="hero">
       <div class="eyebrow">Углеродные единицы</div>
-      <h1>Покупайте и продавайте углеродные единицы напрямую у владельцев</h1>
-      <p>Сделка оформляется векселем: он резервирует единицы за вами в реестре, а зачисление на баланс происходит по вашему запросу.</p>
+      <h1>Покупайте и продавайте пронумерованные векселя на углеродные единицы</h1>
+      <p>На продажу выставляются не «сырые» единицы по цене за штуку, а уже выпущенные векселя — каждый со своим номером и фиксированной ценой за весь объём. У каждого векселя можно проверить продавца-эмитента и всех, через кого он прошёл, по <button class="link-inline" data-view="verify">его номеру</button>.</p>
     </div>
 
     <div class="finder">
@@ -123,6 +124,25 @@
     <div id="listings-grid" class="cards-grid"></div>
   </section>
 
+  <!-- ---------- ПРОВЕРИТЬ ВЕКСЕЛЬ ПО НОМЕРУ (публично) ---------- -->
+  <section id="view-verify" class="view">
+    <div class="hero">
+      <div class="eyebrow">Реестр векселей</div>
+      <h1>Проверить вексель по номеру</h1>
+      <p>Введите номер векселя — увидите его паспорт: кто выпустил, у кого он был, кто владеет им сейчас.</p>
+    </div>
+
+    <form id="verify-form" class="panel verify-form">
+      <label class="field">
+        <span>Номер векселя</span>
+        <input type="text" name="number" placeholder="например, CM-000020" autocomplete="off" required>
+      </label>
+      <button class="btn btn--primary" type="submit">Найти</button>
+    </form>
+
+    <div id="verify-result"></div>
+  </section>
+
   <!-- ---------- МОИ ОБЪЯВЛЕНИЯ (требует входа) ---------- -->
   <section id="view-listings" class="view">
     <header class="view-head">
@@ -139,9 +159,10 @@
 
     <div id="listings-authcontent">
       <div class="panel">
-        <div class="panel-head"><h3>Новое объявление</h3></div>
-        <form id="create-listing-form" class="stack">
-          <div class="filters-grid" data-filter-fields="create"></div>
+        <div class="panel-head"><h3>1. Выпустить новый вексель</h3></div>
+        <p class="panel-desc">Вексель выпускается из ваших единиц в реестре и получает уникальный номер. Пока вы его не выставите на продажу (шаг 2), он просто числится за вами.</p>
+        <form id="mint-voucher-form" class="stack">
+          <div class="filters-grid" data-filter-fields="mint"></div>
 
           <label class="field">
             <span>Доступный остаток по этим характеристикам</span>
@@ -149,52 +170,22 @@
           </label>
           <p id="capacity-result" class="hint"></p>
 
-          <div class="field-row">
-            <label class="field">
-              <span>Сколько выставить, УЕ</span>
-              <input type="number" name="total_quantity" min="0" step="1" required>
-            </label>
-            <label class="field">
-              <span>Базовая справочная цена, ₽</span>
-              <input type="number" name="base_reference_price" min="0" step="0.01" required value="6">
-            </label>
-          </div>
-
           <label class="field">
-            <span>Ценообразование</span>
-            <select name="pricing_mode" id="pricing-mode-select">
-              <option value="PER_UNIT_MARKUP">Своя цена за единицу</option>
-              <option value="FLAT_FEE_PER_DEAL">Комиссия за сделку (не за единицу)</option>
-            </select>
+            <span>Сколько УЕ включить в вексель</span>
+            <input type="number" name="quantity" min="0" step="1" required>
           </label>
 
-          <div class="field-row">
-            <label class="field" data-pricing="PER_UNIT_MARKUP">
-              <span>Цена за единицу, ₽</span>
-              <input type="number" name="price_per_unit" min="0" step="0.01" placeholder="например, 7">
-            </label>
-            <label class="field" data-pricing="FLAT_FEE_PER_DEAL" hidden>
-              <span>Комиссия за сделку, ₽</span>
-              <input type="number" name="flat_fee_per_deal" min="0" step="0.01" placeholder="например, 500">
-            </label>
-          </div>
-
-          <div class="field-row">
-            <label class="field">
-              <span>Мин. объём за одну сделку</span>
-              <input type="number" name="min_deal_quantity" min="0" step="1" placeholder="необязательно">
-            </label>
-            <label class="field">
-              <span>Макс. объём за одну сделку</span>
-              <input type="number" name="max_deal_quantity" min="0" step="1" placeholder="необязательно">
-            </label>
-          </div>
-
-          <button class="btn btn--primary" type="submit">Выставить на продажу</button>
+          <button class="btn btn--primary" type="submit">Выпустить вексель</button>
         </form>
       </div>
 
-      <h3 class="section-label">Активные и прошлые объявления</h3>
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-head"><h3>2. Выставить вексель на продажу</h3></div>
+        <p class="panel-desc">Выберите уже выпущенный вексель (свой или ранее купленный) и назначьте единую цену за него целиком — не за единицу.</p>
+        <div id="my-unlisted-vouchers" class="unlisted-vouchers"></div>
+      </div>
+
+      <h3 class="section-label" style="margin-top:28px">Мои объявления</h3>
       <div id="my-listings-table" class="ledger"></div>
     </div>
   </section>
@@ -215,8 +206,8 @@
 
     <div id="vouchers-authcontent">
       <p class="panel-desc" style="max-width:60ch;margin-bottom:24px">
-        Вексель подтверждает право требования на единицы — они заморожены у продавца в реестре.
-        Нажмите «Обналичить», когда единицы должны реально поступить на ваш баланс.
+        Каждый вексель, который вы держите — свежевыпущенный или купленный на рынке — имеет свой номер.
+        Обналичьте его, когда единицы должны реально поступить на баланс, либо выставьте на продажу дальше.
       </p>
       <div id="vouchers-list" class="cards-grid"></div>
     </div>
